@@ -11,10 +11,13 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.2
   http: ^1.1.0
-  qr_code_scanner: ^1.0.1
   mobile_scanner: ^3.5.0
   cached_network_image: ^3.3.0
   shared_preferences: ^2.2.2
+  url_launcher: ^6.2.2
+  flutter_typeahead: ^4.7.0
+  permission_handler: ^11.0.1
+  flutter_keyboard_visibility: ^5.4.1
 
 dev_dependencies:
   flutter_test:
