@@ -3,7 +3,7 @@ Script to generate QR codes for all products in product_catalog
 QR codes will contain the product's external_id which can be scanned to get product details
 """
 from config import get_db_connection_params
-import psycopg2
+import psycopg
 import qrcode
 from io import BytesIO
 import base64
@@ -32,7 +32,7 @@ def update_products_with_qr_codes():
     """Update all products in product_catalog with QR codes"""
     try:
         params = get_db_connection_params()
-        conn = psycopg2.connect(**params)
+        conn = psycopg.connect(**params)
         cursor = conn.cursor()
         
         # Check if qr_code column exists, if not add it

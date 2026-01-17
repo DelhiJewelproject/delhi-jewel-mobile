@@ -1,7 +1,7 @@
 # PowerShell script to create .env file
 # Note: @ symbol in password is URL-encoded as %40
 $envContent = @"
-DATABASE_URL=postgresql://postgres.uhmorjigojfxchpmzyxy:Munna2003%40@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
+DATABASE_URL=postgresql://postgres.uhmorjigojfxchpmzyxy:Mukhesh$2003@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
 "@
 
 $envContent | Out-File -FilePath ".env" -Encoding utf8

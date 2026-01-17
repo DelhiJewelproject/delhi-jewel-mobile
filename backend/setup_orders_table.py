@@ -2,12 +2,12 @@
 Script to create/update the professional orders table
 """
 from config import get_db_connection_params
-import psycopg2
+import psycopg
 
 def setup_orders_table():
     try:
         params = get_db_connection_params()
-        conn = psycopg2.connect(**params)
+        conn = psycopg.connect(**params)
         cursor = conn.cursor()
         
         # Check if table exists

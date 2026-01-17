@@ -11,16 +11,23 @@ class ProductDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final screenSize = MediaQuery.of(context).size;
+    final isTablet = screenSize.width > 600;
+    final isSmallScreen = screenSize.width < 360;
+    
     return Scaffold(
+      backgroundColor: const Color(0xFFF5F5F5),
       body: Container(
         decoration: BoxDecoration(
           gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
             colors: [
-              const Color(0xFFFAFAFA),
-              Colors.white,
+              const Color(0xFF0F0F0F),
+              const Color(0xFF1A1A1A),
+              const Color(0xFF0F0F0F),
             ],
+            stops: const [0.0, 0.5, 1.0],
           ),
         ),
         child: SafeArea(
@@ -35,14 +42,14 @@ class ProductDetailScreen extends StatelessWidget {
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
                     colors: [
-                      const Color(0xFFD4AF37).withOpacity(0.2),
+                      const Color(0xFFB8860B).withOpacity(0.2),
                       const Color(0xFFB8860B).withOpacity(0.15),
                       const Color(0xFF8B7355).withOpacity(0.1),
                     ],
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: const Color(0xFFD4AF37).withOpacity(0.3),
+                      color: const Color(0xFFB8860B).withOpacity(0.3),
                       blurRadius: 20,
                       offset: const Offset(0, 10),
                     ),
@@ -66,14 +73,14 @@ class ProductDetailScreen extends StatelessWidget {
                             decoration: BoxDecoration(
                               gradient: const LinearGradient(
                                 colors: [
-                                  Color(0xFFD4AF37),
+                                  Color(0xFFB8860B),
                                   Color(0xFFB8860B),
                                 ],
                               ),
                               shape: BoxShape.circle,
                               boxShadow: [
                                 BoxShadow(
-                                  color: const Color(0xFFD4AF37).withOpacity(0.4),
+                                  color: const Color(0xFFB8860B).withOpacity(0.4),
                                   blurRadius: 20,
                                   spreadRadius: 5,
                                 ),
@@ -81,19 +88,21 @@ class ProductDetailScreen extends StatelessWidget {
                             ),
                             child: const Icon(
                               Icons.inventory_2_rounded,
-                              color: Colors.white,
+                              color: const Color(0xFF1A1A1A),
                               size: 60,
                             ),
                           ),
                           const SizedBox(height: 20),
                           Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isSmallScreen ? 16 : 24,
+                            ),
                             child: Text(
                               product.name ?? 'Product Name',
-                              style: const TextStyle(
-                                fontSize: 24,
+                              style: TextStyle(
+                                fontSize: isSmallScreen ? 20 : isTablet ? 28 : 24,
                                 fontWeight: FontWeight.bold,
-                                color: Color(0xFF1A1A1A),
+                                color: const Color(0xFF1A1A1A),
                                 letterSpacing: 0.5,
                                 height: 1.3,
                               ),
@@ -111,7 +120,7 @@ class ProductDetailScreen extends StatelessWidget {
                       left: 16,
                       child: Container(
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.9),
+                          color: const Color(0xFF1A1A1A).withOpacity(0.9),
                           shape: BoxShape.circle,
                           boxShadow: [
                             BoxShadow(
@@ -133,7 +142,8 @@ class ProductDetailScreen extends StatelessWidget {
               // Product Details Section
               Expanded(
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(24.0),
+                  physics: const BouncingScrollPhysics(),
+                  padding: EdgeInsets.all(isSmallScreen ? 16 : isTablet ? 32 : 24),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -147,10 +157,10 @@ class ProductDetailScreen extends StatelessWidget {
                               children: [
                                 Text(
                                   product.name ?? 'Product Name',
-                                  style: const TextStyle(
-                                    fontSize: 28,
+                                  style: TextStyle(
+                                    fontSize: isSmallScreen ? 22 : isTablet ? 32 : 28,
                                     fontWeight: FontWeight.bold,
-                                    color: Color(0xFF1A1A1A),
+                                    color: const Color(0xFF1A1A1A),
                                     letterSpacing: -0.5,
                                   ),
                                 ),
@@ -163,7 +173,7 @@ class ProductDetailScreen extends StatelessWidget {
                                   decoration: BoxDecoration(
                                     gradient: const LinearGradient(
                                       colors: [
-                                        Color(0xFFD4AF37),
+                                        Color(0xFFB8860B),
                                         Color(0xFFB8860B),
                                       ],
                                     ),
@@ -174,7 +184,7 @@ class ProductDetailScreen extends StatelessWidget {
                                     style: const TextStyle(
                                       fontSize: 20,
                                       fontWeight: FontWeight.bold,
-                                      color: Colors.white,
+                                      color: const Color(0xFF1A1A1A),
                                     ),
                                   ),
                                 ),
@@ -186,14 +196,19 @@ class ProductDetailScreen extends StatelessWidget {
                       const SizedBox(height: 30),
                       // Product Information
                       Container(
-                        padding: const EdgeInsets.all(20),
+                        padding: EdgeInsets.all(isSmallScreen ? 16 : 20),
                         decoration: BoxDecoration(
-                          color: Colors.white,
+                          color: const Color(0xFF1A1A1A),
                           borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: const Color(0xFF2A2A2A),
+                            width: 1.5,
+                          ),
                           boxShadow: [
                             BoxShadow(
-                              color: Colors.black.withOpacity(0.05),
-                              blurRadius: 10,
+                              color: Colors.black.withOpacity(0.3),
+                              blurRadius: 12,
+                              spreadRadius: 0,
                               offset: const Offset(0, 4),
                             ),
                           ],
@@ -222,14 +237,19 @@ class ProductDetailScreen extends StatelessWidget {
                       // QR Code Section
                       if (product.qrCode != null || product.externalId != null)
                         Container(
-                          padding: const EdgeInsets.all(20),
+                          padding: EdgeInsets.all(isSmallScreen ? 16 : 20),
                           decoration: BoxDecoration(
-                            color: Colors.white,
+                            color: const Color(0xFF1A1A1A),
                             borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: const Color(0xFF2A2A2A),
+                              width: 1.5,
+                            ),
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.black.withOpacity(0.05),
-                                blurRadius: 10,
+                                color: Colors.black.withOpacity(0.3),
+                                blurRadius: 12,
+                                spreadRadius: 0,
                                 offset: const Offset(0, 4),
                               ),
                             ],
@@ -240,16 +260,16 @@ class ProductDetailScreen extends StatelessWidget {
                                 children: [
                                   Icon(
                                     Icons.qr_code_rounded,
-                                    color: Color(0xFFD4AF37),
+                                    color: Color(0xFFB8860B),
                                     size: 24,
                                   ),
                                   SizedBox(width: 12),
                                   Text(
                                     'QR Code',
                                     style: TextStyle(
-                                      fontSize: 20,
+                                      fontSize: isSmallScreen ? 18 : 20,
                                       fontWeight: FontWeight.bold,
-                                      color: Color(0xFF1A1A1A),
+                                      color: const Color(0xFF1A1A1A),
                                     ),
                                   ),
                                 ],
@@ -288,7 +308,7 @@ class ProductDetailScreen extends StatelessWidget {
                                 'Scan to view product details',
                                 style: TextStyle(
                                   fontSize: 12,
-                                  color: Colors.grey.shade600,
+                                  color: const Color(0xFF1A1A1A)70,
                                 ),
                               ),
                             ],
@@ -300,12 +320,12 @@ class ProductDetailScreen extends StatelessWidget {
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text(
+                            Text(
                               'Available Sizes & Prices',
                               style: TextStyle(
-                                fontSize: 20,
+                                fontSize: isSmallScreen ? 18 : 20,
                                 fontWeight: FontWeight.bold,
-                                color: Color(0xFF1A1A1A),
+                                color: const Color(0xFF1A1A1A),
                               ),
                             ),
                             const SizedBox(height: 16),
@@ -319,7 +339,7 @@ class ProductDetailScreen extends StatelessWidget {
                           borderRadius: BorderRadius.circular(16),
                           boxShadow: [
                             BoxShadow(
-                              color: const Color(0xFFD4AF37).withOpacity(0.3),
+                              color: const Color(0xFFB8860B).withOpacity(0.3),
                               blurRadius: 15,
                               offset: const Offset(0, 8),
                             ),
@@ -334,20 +354,24 @@ class ProductDetailScreen extends StatelessWidget {
                             );
                           },
                           style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 18),
+                            backgroundColor: const Color(0xFFB8860B),
+                            foregroundColor: Colors.black,
+                            padding: EdgeInsets.symmetric(
+                              vertical: isSmallScreen ? 16 : 18,
+                            ),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(16),
                             ),
                           ),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.center,
-                            children: const [
-                              Icon(Icons.shopping_cart_rounded, size: 22),
-                              SizedBox(width: 12),
+                            children: [
+                              Icon(Icons.shopping_cart_rounded, size: isSmallScreen ? 20 : 22),
+                              SizedBox(width: isSmallScreen ? 10 : 12),
                               Text(
                                 'Place Order',
                                 style: TextStyle(
-                                  fontSize: 18,
+                                  fontSize: isSmallScreen ? 16 : 18,
                                   fontWeight: FontWeight.w600,
                                   letterSpacing: 0.5,
                                 ),
@@ -373,13 +397,17 @@ class ProductDetailScreen extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFF1A1A1A),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(
+          color: const Color(0xFF2A2A2A),
+          width: 1.5,
+        ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.03),
+            color: Colors.black.withOpacity(0.3),
             blurRadius: 8,
+            spreadRadius: 0,
             offset: const Offset(0, 2),
           ),
         ],
@@ -392,7 +420,7 @@ class ProductDetailScreen extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFD4AF37).withOpacity(0.1),
+                  color: const Color(0xFFB8860B).withOpacity(0.1),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
@@ -400,7 +428,7 @@ class ProductDetailScreen extends StatelessWidget {
                   style: const TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
-                    color: Color(0xFFD4AF37),
+                    color: Color(0xFFB8860B),
                   ),
                 ),
               ),
@@ -413,7 +441,7 @@ class ProductDetailScreen extends StatelessWidget {
                   style: const TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
-                    color: Color(0xFF1A1A1A),
+                    color: const Color(0xFF1A1A1A),
                   ),
                 ),
             ],
@@ -446,16 +474,19 @@ class ProductDetailScreen extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: Colors.grey.shade50,
+        color: const Color(0xFF0F0F0F),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.shade300),
+        border: Border.all(
+          color: const Color(0xFF2A2A2A),
+          width: 1,
+        ),
       ),
       child: Text(
         '$label: ₹${price.toStringAsFixed(2)}',
-        style: TextStyle(
+        style: const TextStyle(
           fontSize: 12,
           fontWeight: FontWeight.w600,
-          color: Colors.grey.shade700,
+          color: const Color(0xFF1A1A1A)70,
         ),
       ),
     );
@@ -468,12 +499,12 @@ class ProductDetailScreen extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
-            color: (color ?? const Color(0xFFD4AF37)).withOpacity(0.1),
+            color: (color ?? const Color(0xFFB8860B)).withOpacity(0.1),
             borderRadius: BorderRadius.circular(12),
           ),
           child: Icon(
             icon,
-            color: color ?? const Color(0xFFD4AF37),
+            color: color ?? const Color(0xFFB8860B),
             size: 22,
           ),
         ),
@@ -487,7 +518,7 @@ class ProductDetailScreen extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
-                  color: Colors.grey.shade600,
+                  color: const Color(0xFF1A1A1A)70,
                 ),
               ),
               const SizedBox(height: 4),
@@ -496,7 +527,7 @@ class ProductDetailScreen extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
-                  color: color ?? const Color(0xFF1A1A1A),
+                  color: color ?? Colors.white,
                 ),
               ),
             ],
@@ -512,7 +543,7 @@ class _DiamondPatternPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = const Color(0xFFD4AF37).withOpacity(0.08)
+      ..color = const Color(0xFFB8860B).withOpacity(0.08)
       ..style = PaintingStyle.fill;
 
     const spacing = 40.0;

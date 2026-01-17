@@ -1,8 +1,8 @@
 from config import get_db_connection_params
-import psycopg2
+import psycopg
 
 params = get_db_connection_params()
-conn = psycopg2.connect(**params)
+conn = psycopg.connect(**params)
 cursor = conn.cursor()
 
 print("=== product_catalog columns ===")

@@ -4,15 +4,16 @@ Run this once to set up your database tables
 """
 import sys
 from config import get_db_connection_params
-import psycopg2
+import psycopg
 
 def setup_database():
     """Create database tables if they don't exist"""
     try:
         params = get_db_connection_params()
-        print(f"Connecting to database: {params['host']}/{params['database']}")
+        # psycopg3 uses 'dbname' instead of 'database' in connection params
+        print(f"Connecting to database: {params['host']}/{params['dbname']}")
         
-        conn = psycopg2.connect(**params)
+        conn = psycopg.connect(**params)
         cursor = conn.cursor()
         
         print("Creating products table...")

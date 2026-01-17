@@ -19,7 +19,7 @@ class ProductEditScreen extends StatelessWidget {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
                   content: Text('Save functionality coming soon'),
-                  backgroundColor: Color(0xFFD4AF37),
+                  backgroundColor: Color(0xFFB8860B),
                 ),
               );
             },

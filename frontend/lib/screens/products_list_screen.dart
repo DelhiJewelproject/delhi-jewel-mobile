@@ -96,17 +96,23 @@ class _ProductsListScreenState extends State<ProductsListScreen>
 
   @override
   Widget build(BuildContext context) {
+    final screenSize = MediaQuery.of(context).size;
+    final isTablet = screenSize.width > 600;
+    final isSmallScreen = screenSize.width < 360;
+    
     return Scaffold(
+      backgroundColor: const Color(0xFFF5F5F5),
       body: Container(
         decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [
-              const Color(0xFFFAFAFA),
-              Colors.white,
-              const Color(0xFFF5F5F5),
+              const Color(0xFF0F0F0F),
+              const Color(0xFF1A1A1A),
+              const Color(0xFF0F0F0F),
             ],
+            stops: const [0.0, 0.5, 1.0],
           ),
         ),
         child: SafeArea(
@@ -131,71 +137,109 @@ class _ProductsListScreenState extends State<ProductsListScreen>
   }
 
   Widget _buildHeader() {
+    final screenSize = MediaQuery.of(context).size;
+    final isTablet = screenSize.width > 600;
+    final isSmallScreen = screenSize.width < 360;
+    
     return Container(
-      padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
+      padding: EdgeInsets.fromLTRB(
+        isSmallScreen ? 16 : isTablet ? 32 : 24,
+        isSmallScreen ? 16 : 20,
+        isSmallScreen ? 16 : isTablet ? 32 : 24,
+        isSmallScreen ? 16 : 20,
+      ),
       decoration: BoxDecoration(
-        color: Colors.white,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            const Color(0xFF1A1A1A),
+            const Color(0xFF252525),
+            const Color(0xFF1A1A1A),
+          ],
+        ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 15,
-            offset: const Offset(0, 2),
+            color: Colors.black.withOpacity(0.5),
+            blurRadius: 20,
+            spreadRadius: 0,
+            offset: const Offset(0, 4),
           ),
         ],
+        border: Border(
+          bottom: BorderSide(
+            color: const Color(0xFFB8860B).withOpacity(0.2),
+            width: 1,
+          ),
+        ),
       ),
       child: Row(
         children: [
           Container(
-            padding: const EdgeInsets.all(12),
+            padding: EdgeInsets.all(isSmallScreen ? 10 : 12),
             decoration: BoxDecoration(
               gradient: const LinearGradient(
-                colors: [Color(0xFFD4AF37), Color(0xFFB8860B)],
+                colors: [Color(0xFFB8860B), Color(0xFFC9A227)],
               ),
-              borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(12),
               boxShadow: [
                 BoxShadow(
-                  color: const Color(0xFFD4AF37).withOpacity(0.3),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
+                  color: const Color(0xFFB8860B).withOpacity(0.4),
+                  blurRadius: 8,
+                  spreadRadius: 0,
+                  offset: const Offset(0, 2),
                 ),
               ],
             ),
-            child: const Icon(
+            child: Icon(
               Icons.inventory_2_rounded,
-              color: Colors.white,
-              size: 28,
+              color: Colors.black,
+              size: isSmallScreen ? 24 : 28,
             ),
           ),
-          const SizedBox(width: 16),
+          SizedBox(width: isSmallScreen ? 12 : 16),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Product Catalog',
                   style: TextStyle(
-                    fontSize: 28,
+                    fontSize: isSmallScreen ? 22 : isTablet ? 32 : 28,
                     fontWeight: FontWeight.bold,
-                    color: Color(0xFF1A1A1A),
+                    color: const Color(0xFF1A1A1A),
                     letterSpacing: -0.5,
                   ),
                 ),
-                const SizedBox(height: 4),
+                SizedBox(height: isSmallScreen ? 2 : 4),
                 Text(
                   '${_products.length} products available',
                   style: TextStyle(
-                    fontSize: 14,
-                    color: Colors.grey.shade600,
+                    fontSize: isSmallScreen ? 12 : 14,
+                    color: const Color(0xFF1A1A1A)70,
                   ),
                 ),
               ],
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.refresh_rounded),
-            onPressed: _loadProducts,
-            color: const Color(0xFFD4AF37),
-            tooltip: 'Refresh',
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: _loadProducts,
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A1A1A).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  Icons.refresh_rounded,
+                  color: const Color(0xFFB8860B),
+                  size: isSmallScreen ? 20 : 24,
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -203,19 +247,37 @@ class _ProductsListScreenState extends State<ProductsListScreen>
   }
 
   Widget _buildSearchAndFilter() {
+    final screenSize = MediaQuery.of(context).size;
+    final isSmallScreen = screenSize.width < 360;
+    
     return Container(
-      padding: const EdgeInsets.all(16),
-      color: Colors.white,
+      padding: EdgeInsets.all(isSmallScreen ? 12 : 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A1A),
+        border: Border(
+          bottom: BorderSide(
+            color: const Color(0xFF2A2A2A),
+            width: 1,
+          ),
+        ),
+      ),
       child: Column(
         children: [
           // Search bar
           Container(
             decoration: BoxDecoration(
-              color: Colors.grey.shade50,
+              color: const Color(0xFF0F0F0F),
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.grey.shade200),
+              border: Border.all(
+                color: const Color(0xFF2A2A2A),
+                width: 1.5,
+              ),
             ),
             child: TextField(
+              style: TextStyle(
+                color: const Color(0xFF1A1A1A),
+                fontSize: isSmallScreen ? 14 : 15,
+              ),
               onChanged: (value) {
                 setState(() {
                   _searchQuery = value;
@@ -223,10 +285,14 @@ class _ProductsListScreenState extends State<ProductsListScreen>
               },
               decoration: InputDecoration(
                 hintText: 'Search products...',
-                prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFFD4AF37)),
+                hintStyle: TextStyle(
+                  color: const Color(0xFF1A1A1A)60,
+                  fontSize: isSmallScreen ? 14 : 15,
+                ),
+                prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFFB8860B)),
                 suffixIcon: _searchQuery.isNotEmpty
                     ? IconButton(
-                        icon: const Icon(Icons.clear_rounded, size: 20),
+                        icon: const Icon(Icons.clear_rounded, size: 20, color: const Color(0xFF1A1A1A)70),
                         onPressed: () {
                           setState(() {
                             _searchQuery = '';
@@ -235,7 +301,10 @@ class _ProductsListScreenState extends State<ProductsListScreen>
                       )
                     : null,
                 border: InputBorder.none,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: isSmallScreen ? 16 : 20,
+                  vertical: isSmallScreen ? 14 : 16,
+                ),
               ),
             ),
           ),
@@ -271,68 +340,89 @@ class _ProductsListScreenState extends State<ProductsListScreen>
           _selectedCategory = selected ? category : null;
         });
       },
-      selectedColor: const Color(0xFFD4AF37),
-      checkmarkColor: Colors.white,
+      selectedColor: const Color(0xFFB8860B),
+      checkmarkColor: Colors.black,
+      backgroundColor: const Color(0xFF2A2A2A),
       labelStyle: TextStyle(
-        color: isSelected ? Colors.white : Colors.grey.shade700,
+        color: isSelected ? Colors.black : Colors.white70,
         fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+        fontSize: 13,
       ),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      side: BorderSide(
+        color: isSelected ? const Color(0xFFB8860B) : const Color(0xFF2A2A2A),
+        width: 1.5,
+      ),
     );
   }
 
   Widget _buildLoadingView() {
     return const Center(
       child: CircularProgressIndicator(
-        color: Color(0xFFD4AF37),
+        color: Color(0xFFB8860B),
       ),
     );
   }
 
   Widget _buildErrorView() {
+    final screenSize = MediaQuery.of(context).size;
+    final isSmallScreen = screenSize.width < 360;
+    
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24.0),
+        padding: EdgeInsets.all(isSmallScreen ? 20 : 24),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Container(
-              padding: const EdgeInsets.all(20),
+              padding: EdgeInsets.all(isSmallScreen ? 16 : 20),
               decoration: BoxDecoration(
-                color: Colors.red.shade50,
+                color: Colors.red.withOpacity(0.1),
                 shape: BoxShape.circle,
+                border: Border.all(
+                  color: Colors.red.withOpacity(0.3),
+                  width: 2,
+                ),
               ),
               child: Icon(
                 Icons.error_outline_rounded,
-                size: 64,
+                size: isSmallScreen ? 48 : 64,
                 color: Colors.red.shade300,
               ),
             ),
-            const SizedBox(height: 24),
-            const Text(
+            SizedBox(height: isSmallScreen ? 20 : 24),
+            Text(
               'Error Loading Products',
               style: TextStyle(
-                fontSize: 20,
+                fontSize: isSmallScreen ? 18 : 20,
                 fontWeight: FontWeight.bold,
-                color: Color(0xFF1A1A1A),
+                color: const Color(0xFF1A1A1A),
               ),
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: isSmallScreen ? 10 : 12),
             Text(
               _errorMessage ?? 'Unknown error occurred',
               textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey.shade600,
+                fontSize: isSmallScreen ? 13 : 14,
+                color: const Color(0xFF1A1A1A)70,
               ),
             ),
-            const SizedBox(height: 32),
+            SizedBox(height: isSmallScreen ? 24 : 32),
             ElevatedButton.icon(
               onPressed: _loadProducts,
               icon: const Icon(Icons.refresh_rounded),
               label: const Text('Retry'),
               style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                backgroundColor: const Color(0xFFB8860B),
+                foregroundColor: Colors.black,
+                padding: EdgeInsets.symmetric(
+                  horizontal: isSmallScreen ? 20 : 24,
+                  vertical: isSmallScreen ? 14 : 16,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
             ),
           ],
@@ -342,42 +432,49 @@ class _ProductsListScreenState extends State<ProductsListScreen>
   }
 
   Widget _buildEmptyView() {
+    final screenSize = MediaQuery.of(context).size;
+    final isSmallScreen = screenSize.width < 360;
+    
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24.0),
+        padding: EdgeInsets.all(isSmallScreen ? 20 : 24),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Container(
-              padding: const EdgeInsets.all(20),
+              padding: EdgeInsets.all(isSmallScreen ? 16 : 20),
               decoration: BoxDecoration(
-                color: const Color(0xFFD4AF37).withOpacity(0.1),
+                color: const Color(0xFFB8860B).withOpacity(0.15),
                 shape: BoxShape.circle,
+                border: Border.all(
+                  color: const Color(0xFFB8860B).withOpacity(0.3),
+                  width: 2,
+                ),
               ),
               child: const Icon(
                 Icons.inventory_2_outlined,
                 size: 64,
-                color: Color(0xFFD4AF37),
+                color: Color(0xFFB8860B),
               ),
             ),
-            const SizedBox(height: 24),
-            const Text(
+            SizedBox(height: isSmallScreen ? 20 : 24),
+            Text(
               'No Products Found',
               style: TextStyle(
-                fontSize: 20,
+                fontSize: isSmallScreen ? 18 : 20,
                 fontWeight: FontWeight.bold,
-                color: Color(0xFF1A1A1A),
+                color: const Color(0xFF1A1A1A),
               ),
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: isSmallScreen ? 10 : 12),
             Text(
               _searchQuery.isNotEmpty
                   ? 'Try adjusting your search or filters'
                   : 'There are no products in the database yet.',
               textAlign: TextAlign.center,
               style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey.shade600,
+                fontSize: isSmallScreen ? 13 : 14,
+                color: const Color(0xFF1A1A1A)70,
               ),
             ),
           ],
@@ -391,7 +488,7 @@ class _ProductsListScreenState extends State<ProductsListScreen>
       opacity: _fadeAnimation,
       child: RefreshIndicator(
         onRefresh: _loadProducts,
-        color: const Color(0xFFD4AF37),
+        color: const Color(0xFFB8860B),
         child: GridView.builder(
           padding: const EdgeInsets.all(16),
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -510,18 +607,23 @@ class _ProductCardState extends State<_ProductCard>
         builder: (context, child) {
           return Transform.scale(
             scale: _scaleAnimation.value,
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.1 * _elevationAnimation.value / 8),
-                    blurRadius: 15 * _elevationAnimation.value / 8,
-                    offset: Offset(0, 4 * _elevationAnimation.value / 8),
-                  ),
-                ],
+          child: Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A1A1A),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: const Color(0xFF2A2A2A),
+                width: 1.5,
               ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.5 * _elevationAnimation.value / 8),
+                  blurRadius: 12 * _elevationAnimation.value / 8,
+                  spreadRadius: 0,
+                  offset: Offset(0, 4 * _elevationAnimation.value / 8),
+                ),
+              ],
+            ),
               child: Material(
                 color: Colors.transparent,
                 child: InkWell(
@@ -543,14 +645,14 @@ class _ProductCardState extends State<_ProductCard>
                               begin: Alignment.topLeft,
                               end: Alignment.bottomRight,
                               colors: [
-                                const Color(0xFFD4AF37).withOpacity(0.15),
+                                const Color(0xFFB8860B).withOpacity(0.15),
                                 const Color(0xFFB8860B).withOpacity(0.1),
                                 const Color(0xFF8B7355).withOpacity(0.08),
                               ],
                             ),
                             boxShadow: [
                               BoxShadow(
-                                color: const Color(0xFFD4AF37).withOpacity(0.2),
+                                color: const Color(0xFFB8860B).withOpacity(0.2),
                                 blurRadius: 10,
                                 offset: const Offset(0, 4),
                               ),
@@ -574,7 +676,7 @@ class _ProductCardState extends State<_ProductCard>
                                       Container(
                                         padding: const EdgeInsets.all(12),
                                         decoration: BoxDecoration(
-                                          color: Colors.white.withOpacity(0.9),
+                                          color: const Color(0xFF1A1A1A).withOpacity(0.9),
                                           shape: BoxShape.circle,
                                           boxShadow: [
                                             BoxShadow(
@@ -585,7 +687,7 @@ class _ProductCardState extends State<_ProductCard>
                                         ),
                                         child: const Icon(
                                           Icons.inventory_2_rounded,
-                                          color: Color(0xFFD4AF37),
+                                          color: Color(0xFFB8860B),
                                           size: 32,
                                         ),
                                       ),
@@ -596,7 +698,7 @@ class _ProductCardState extends State<_ProductCard>
                                           style: const TextStyle(
                                             fontSize: 16,
                                             fontWeight: FontWeight.bold,
-                                            color: Color(0xFF1A1A1A),
+                                            color: const Color(0xFF1A1A1A),
                                             height: 1.3,
                                           ),
                                           textAlign: TextAlign.center,
@@ -629,7 +731,7 @@ class _ProductCardState extends State<_ProductCard>
                                     style: const TextStyle(
                                       fontSize: 14,
                                       fontWeight: FontWeight.bold,
-                                      color: Color(0xFF1A1A1A),
+                                      color: const Color(0xFF1A1A1A),
                                     ),
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis,
@@ -644,13 +746,13 @@ class _ProductCardState extends State<_ProductCard>
                                       decoration: BoxDecoration(
                                         gradient: LinearGradient(
                                           colors: [
-                                            const Color(0xFFD4AF37).withOpacity(0.2),
+                                            const Color(0xFFB8860B).withOpacity(0.2),
                                             const Color(0xFFB8860B).withOpacity(0.15),
                                           ],
                                         ),
                                         borderRadius: BorderRadius.circular(10),
                                         border: Border.all(
-                                          color: const Color(0xFFD4AF37).withOpacity(0.3),
+                                          color: const Color(0xFFB8860B).withOpacity(0.3),
                                           width: 1,
                                         ),
                                       ),
@@ -677,14 +779,14 @@ class _ProductCardState extends State<_ProductCard>
                                     decoration: BoxDecoration(
                                       gradient: const LinearGradient(
                                         colors: [
-                                          Color(0xFFD4AF37),
+                                          Color(0xFFB8860B),
                                           Color(0xFFB8860B),
                                         ],
                                       ),
                                       borderRadius: BorderRadius.circular(12),
                                       boxShadow: [
                                         BoxShadow(
-                                          color: const Color(0xFFD4AF37).withOpacity(0.3),
+                                          color: const Color(0xFFB8860B).withOpacity(0.3),
                                           blurRadius: 8,
                                           offset: const Offset(0, 2),
                                         ),
@@ -695,7 +797,7 @@ class _ProductCardState extends State<_ProductCard>
                                       style: const TextStyle(
                                         fontSize: 15,
                                         fontWeight: FontWeight.bold,
-                                        color: Colors.white,
+                                        color: const Color(0xFF1A1A1A),
                                         letterSpacing: 0.5,
                                       ),
                                     ),
@@ -720,14 +822,14 @@ class _ProductCardState extends State<_ProductCard>
                                         Icon(
                                           Icons.qr_code_rounded,
                                           size: 12,
-                                          color: const Color(0xFFD4AF37),
+                                          color: const Color(0xFFB8860B),
                                         ),
                                         const SizedBox(width: 2),
                                         Text(
                                           'QR',
                                           style: TextStyle(
                                             fontSize: 11,
-                                            color: const Color(0xFFD4AF37),
+                                            color: const Color(0xFFB8860B),
                                             fontWeight: FontWeight.w600,
                                           ),
                                         ),
@@ -744,10 +846,10 @@ class _ProductCardState extends State<_ProductCard>
                       Container(
                         padding: const EdgeInsets.all(8),
                         decoration: BoxDecoration(
-                          color: Colors.grey.shade50,
+                          color: const Color(0xFF0F0F0F),
                           borderRadius: const BorderRadius.only(
-                            bottomLeft: Radius.circular(24),
-                            bottomRight: Radius.circular(24),
+                            bottomLeft: Radius.circular(20),
+                            bottomRight: Radius.circular(20),
                           ),
                         ),
                         child: Row(

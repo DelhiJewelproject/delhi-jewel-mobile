@@ -17,77 +17,85 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Delhi Jewel',
+      title: 'Deco Jewel',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF6366F1),
-          brightness: Brightness.light,
-          primary: const Color(0xFF6366F1),
-          secondary: const Color(0xFF8B5CF6),
-          tertiary: const Color(0xFFEC4899),
-          surface: Colors.white,
-          background: const Color(0xFFF8FAFC),
+        brightness: Brightness.dark,
+        colorScheme: ColorScheme.dark(
+          primary: const Color(0xFFD4AF37), // Gold
+          secondary: const Color(0xFFFFD700), // Bright Gold
+          tertiary: const Color(0xFFB8860B), // Dark Goldenrod
+          surface: const Color(0xFF1A1A1A), // Dark surface
+          background: Colors.black, // Pure black background
           error: const Color(0xFFEF4444),
-          onPrimary: Colors.white,
-          onSecondary: Colors.white,
-          onSurface: const Color(0xFF1E293B),
-          onBackground: const Color(0xFF1E293B),
+          onPrimary: Colors.black,
+          onSecondary: Colors.black,
+          onSurface: Colors.white,
+          onBackground: Colors.white,
+          surfaceVariant: const Color(0xFF2D2D2D),
         ),
-        scaffoldBackgroundColor: const Color(0xFFF8FAFC),
+        scaffoldBackgroundColor: Colors.black,
         appBarTheme: AppBarTheme(
-          backgroundColor: const Color(0xFF6366F1),
-          foregroundColor: Colors.white,
+          backgroundColor: Colors.black,
+          foregroundColor: const Color(0xFFD4AF37),
           elevation: 0,
           centerTitle: true,
           systemOverlayStyle: SystemUiOverlayStyle.light,
           titleTextStyle: const TextStyle(
             fontSize: 20,
             fontWeight: FontWeight.w700,
-            color: Colors.white,
+            color: Color(0xFFD4AF37),
             letterSpacing: 0.5,
           ),
+          iconTheme: const IconThemeData(color: Color(0xFFD4AF37)),
         ),
         cardTheme: CardThemeData(
-          elevation: 2,
+          elevation: 8,
+          shadowColor: const Color(0xFFD4AF37).withOpacity(0.3),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(20),
+            side: BorderSide(
+              color: const Color(0xFFD4AF37).withOpacity(0.2),
+              width: 1,
+            ),
           ),
-          color: Colors.white,
+          color: const Color(0xFF1A1A1A),
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
-          fillColor: Colors.white,
+          fillColor: const Color(0xFF1A1A1A),
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
-            borderSide: BorderSide(color: Colors.grey.shade300),
+            borderSide: BorderSide(color: Colors.grey.shade800),
           ),
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
-            borderSide: BorderSide(color: Colors.grey.shade300),
+            borderSide: BorderSide(color: Colors.grey.shade800),
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: Color(0xFF6366F1), width: 2),
+            borderSide: const BorderSide(color: Color(0xFFD4AF37), width: 2),
           ),
           errorBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: Colors.red, width: 1.5),
+            borderSide: const BorderSide(color: Color(0xFFEF4444), width: 1.5),
           ),
           focusedErrorBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
-            borderSide: const BorderSide(color: Colors.red, width: 2),
+            borderSide: const BorderSide(color: Color(0xFFEF4444), width: 2),
           ),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
-          labelStyle: TextStyle(color: Colors.grey.shade700, fontSize: 16),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+          labelStyle: const TextStyle(color: Colors.white70, fontSize: 16),
+          hintStyle: TextStyle(color: Colors.grey.shade600, fontSize: 16),
         ),
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF6366F1),
-            foregroundColor: Colors.white,
-            elevation: 4,
-            shadowColor: const Color(0xFF6366F1).withOpacity(0.5),
+            backgroundColor: const Color(0xFFD4AF37),
+            foregroundColor: Colors.black,
+            elevation: 8,
+            shadowColor: const Color(0xFFD4AF37).withOpacity(0.5),
             padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 18),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16),
@@ -103,29 +111,36 @@ class MyApp extends StatelessWidget {
           displayLarge: TextStyle(
             fontSize: 32,
             fontWeight: FontWeight.bold,
-            color: Color(0xFF1A1A1A),
+            color: Colors.white,
             letterSpacing: -0.5,
           ),
           displayMedium: TextStyle(
             fontSize: 28,
             fontWeight: FontWeight.bold,
-            color: Color(0xFF1A1A1A),
+            color: Colors.white,
           ),
           headlineMedium: TextStyle(
             fontSize: 24,
             fontWeight: FontWeight.w600,
-            color: Color(0xFF1A1A1A),
+            color: Colors.white,
           ),
           bodyLarge: TextStyle(
             fontSize: 16,
-            color: Color(0xFF1A1A1A),
+            color: Colors.white,
             height: 1.5,
           ),
+        ),
+        snackBarTheme: SnackBarThemeData(
+          backgroundColor: const Color(0xFF1A1A1A),
+          contentTextStyle: const TextStyle(color: Colors.white),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: Color(0xFFD4AF37), width: 1),
+          ),
+          behavior: SnackBarBehavior.floating,
         ),
       ),
       home: const SplashScreen(),
     );
   }
 }
-
-

@@ -4,6 +4,8 @@
 CREATE TABLE IF NOT EXISTS orders (
     id SERIAL PRIMARY KEY,
     order_number VARCHAR(50) UNIQUE NOT NULL,
+    party_name VARCHAR(255),
+    station VARCHAR(255),
     product_id INTEGER REFERENCES product_catalog(id) ON DELETE SET NULL,
     product_external_id INTEGER,
     product_name VARCHAR(500),

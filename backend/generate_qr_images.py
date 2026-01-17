@@ -3,7 +3,7 @@ Generate QR code images for all products and save them to a folder
 This creates physical QR code images that can be printed or displayed for testing
 """
 from config import get_db_connection_params
-import psycopg2
+import psycopg
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
 import os
@@ -86,7 +86,7 @@ def generate_all_qr_codes():
     """Generate QR code images for all active products"""
     try:
         params = get_db_connection_params()
-        conn = psycopg2.connect(**params)
+        conn = psycopg.connect(**params)
         cursor = conn.cursor()
         
         # Get all active products

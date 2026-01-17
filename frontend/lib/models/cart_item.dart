@@ -5,18 +5,17 @@ class CartItem {
   final Product product;
   ProductSize? selectedSize;
   int quantity;
+  final double unitPrice; // Store the actual unit price entered
+  
   double get totalPrice {
-    if (selectedSize != null) {
-      final price = selectedSize!.minPrice ?? 0.0;
-      return price * quantity;
-    }
-    return 0.0;
+    return unitPrice * quantity;
   }
 
   CartItem({
     required this.product,
     this.selectedSize,
     this.quantity = 1,
+    required this.unitPrice, // Require unit price
   });
 }
 

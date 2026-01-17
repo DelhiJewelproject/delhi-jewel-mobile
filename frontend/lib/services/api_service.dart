@@ -1,24 +1,24 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/product.dart';
+import '../models/challan.dart';
 
 class ApiService {
-  // Update this URL to match your backend server
-  // For Android Emulator: use 'http://10.0.2.2:8000'
-  // For iOS Simulator: use 'http://localhost:8000'
-  // For Physical Device: use 'http://192.168.2.128:8000' (your computer's IP)
-  // Change this IP to your computer's local IP address (check with: ipconfig on Windows)
-  static const String baseUrl = 'http://192.168.2.128:8000';
+  // Backend API base URL - EC2 instance
+  static const String baseUrl = 'http://65.1.12.120:9010';
 
   static Future<Product> getProductByBarcode(String barcode) async {
     try {
       final response = await http.get(
-        Uri.parse('$baseUrl/api/product/barcode/$barcode'),
+        Uri.parse(
+            '$baseUrl/api/product/barcode/$barcode'), // Now this will be correct
         headers: {'Content-Type': 'application/json'},
       ).timeout(
         const Duration(seconds: 10),
         onTimeout: () {
-          throw Exception('Connection timeout. Please check your network connection.');
+          throw Exception(
+              'Connection timeout. Please check your network connection.');
         },
       );
 
@@ -38,22 +38,26 @@ class ApiService {
       }
     } catch (e) {
       print('API Error (barcode): $e');
-      if (e.toString().contains('timeout') || e.toString().contains('Connection timed out')) {
-        throw Exception('Connection timeout. Please check your network connection.');
+      if (e.toString().contains('timeout') ||
+          e.toString().contains('Connection timed out')) {
+        throw Exception(
+            'Connection timeout. Please check your network connection.');
       }
       throw Exception('Network error: $e');
     }
   }
 
+  // Update all other methods similarly:
   static Future<Product> getProductById(int productId) async {
     try {
       final response = await http.get(
-        Uri.parse('$baseUrl/api/product/$productId'),
+        Uri.parse('$baseUrl/api/v1/products-master/$productId'), // Using products_master endpoint
         headers: {'Content-Type': 'application/json'},
       ).timeout(
         const Duration(seconds: 10),
         onTimeout: () {
-          throw Exception('Connection timeout. Please check your network connection.');
+          throw Exception(
+              'Connection timeout. Please check your network connection.');
         },
       );
 
@@ -73,8 +77,10 @@ class ApiService {
       }
     } catch (e) {
       print('API Error (ID): $e');
-      if (e.toString().contains('timeout') || e.toString().contains('Connection timed out')) {
-        throw Exception('Connection timeout. Please check your network connection.');
+      if (e.toString().contains('timeout') ||
+          e.toString().contains('Connection timed out')) {
+        throw Exception(
+            'Connection timeout. Please check your network connection.');
       }
       throw Exception('Network error: $e');
     }
@@ -83,12 +89,13 @@ class ApiService {
   static Future<List<Product>> getAllProducts() async {
     try {
       final response = await http.get(
-        Uri.parse('$baseUrl/api/products'),
+        Uri.parse('$baseUrl/api/v1/products-master/'), // Using products_master endpoint
         headers: {'Content-Type': 'application/json'},
       ).timeout(
-        const Duration(seconds: 10),
+        const Duration(seconds: 60), // Increased timeout for large product catalogs
         onTimeout: () {
-          throw Exception('Connection timeout. Please check your network connection and ensure the backend is running at $baseUrl');
+          throw Exception(
+              'Connection timeout. Please check your network connection and ensure the backend is running at $baseUrl');
         },
       );
 
@@ -108,55 +115,408 @@ class ApiService {
       }
     } catch (e) {
       print('API Error: $e');
-      if (e.toString().contains('timeout') || e.toString().contains('Connection timed out')) {
-        throw Exception('Connection timeout. Please ensure:\n1. Backend is running at $baseUrl\n2. Both devices are on the same WiFi network\n3. Firewall allows port 8000');
+      if (e.toString().contains('timeout') ||
+          e.toString().contains('Connection timed out')) {
+        throw Exception(
+            'Connection timeout. Please ensure:\n1. Backend is running at $baseUrl\n2. Both devices are on the same WiFi network\n3. Firewall allows port 9010');
       }
       throw Exception('Network error: $e');
     }
   }
 
-  static Future<List<Product>> searchProducts(String query) async {
+  // Update all other endpoints similarly:
+  static Future<Map<String, dynamic>> createOrder(
+      Map<String, dynamic> orderData) async {
     try {
-      // Get all products and filter by query
-      final allProducts = await getAllProducts();
-      if (query.isEmpty) return [];
-      
-      final lowerQuery = query.toLowerCase();
-      return allProducts.where((product) {
-        final name = (product.name ?? '').toLowerCase();
-        final externalId = (product.externalId ?? '').toString();
-        final category = (product.categoryName ?? '').toLowerCase();
-        return name.contains(lowerQuery) || 
-               externalId.contains(lowerQuery) ||
-               category.contains(lowerQuery);
-      }).toList();
+      print('Sending order data: $orderData');
+      final response = await http
+          .post(
+        Uri.parse('$baseUrl/api/order'), // Fixed
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode(orderData),
+      )
+          .timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          throw Exception('Request timeout. Please check your connection.');
+        },
+      );
+
+      print('Response status: ${response.statusCode}');
+      print('Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body);
+      } else {
+        try {
+          final errorData = json.decode(response.body);
+          final errorMessage = errorData['detail'] ??
+              errorData['message'] ??
+              'Failed to create order';
+          print('Error from server: $errorMessage');
+          throw Exception(errorMessage);
+        } catch (e) {
+          if (e.toString().contains('Exception:')) {
+            rethrow;
+          }
+          throw Exception(
+              'Failed to create order: ${response.statusCode} - ${response.body}');
+        }
+      }
     } catch (e) {
-      throw Exception('Search error: $e');
+      print('API Error in createOrder: $e');
+      if (e.toString().contains('Exception:')) {
+        rethrow;
+      }
+      throw Exception('Network error: $e');
     }
   }
 
-  static String getProductQrCodeUrl(int productId) {
-    return '$baseUrl/api/product/$productId/qr-code';
-  }
-
-  static Future<Map<String, dynamic>> createOrder(Map<String, dynamic> orderData) async {
+  static Future<Map<String, dynamic>> createOrderWithMultipleItems(
+      Map<String, dynamic> orderData) async {
     try {
-      final response = await http.post(
-        Uri.parse('$baseUrl/api/order'),
+      final response = await http
+          .post(
+        Uri.parse('$baseUrl/api/order/multiple'), // Fixed
         headers: {'Content-Type': 'application/json'},
         body: json.encode(orderData),
+      )
+          .timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          throw Exception(
+              'Connection timeout. Please check your network connection.');
+        },
+      );
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body);
+      } else if (response.statusCode == 404) {
+        throw Exception(
+            'Order endpoint not found. Please ensure the backend server is running and has been restarted with the latest code.');
+      } else {
+        final errorBody = response.body;
+        print('Error response (${response.statusCode}): $errorBody');
+        try {
+          final errorJson = json.decode(errorBody);
+          final errorDetail =
+              errorJson['detail'] ?? errorJson['message'] ?? 'Unknown error';
+          throw Exception(errorDetail);
+        } catch (e) {
+          throw Exception(
+              'Failed to create order: ${response.statusCode} - ${response.body}');
+        }
+      }
+    } catch (e) {
+      print('API Error in createOrderWithMultipleItems: $e');
+      if (e.toString().contains('Exception:')) {
+        rethrow;
+      }
+      throw Exception('Network error: $e');
+    }
+  }
+
+  static Future<Map<String, dynamic>> generateLabels(
+      Map<String, dynamic> labelData) async {
+    try {
+      print('Sending label data: $labelData');
+      final response = await http
+          .post(
+        Uri.parse('$baseUrl/api/labels/generate'), // Fixed
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode(labelData),
+      )
+          .timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {
+          throw Exception(
+              'Connection timeout. Please check your network connection.');
+        },
+      );
+
+      print('Response status: ${response.statusCode}');
+      print('Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body);
+      } else {
+        try {
+          final errorData = json.decode(response.body);
+          final errorMessage = errorData['detail'] ??
+              errorData['message'] ??
+              'Failed to generate labels';
+          print('Error from server: $errorMessage');
+          throw Exception(errorMessage);
+        } catch (e) {
+          if (e.toString().contains('Exception:')) {
+            rethrow;
+          }
+          throw Exception(
+              'Failed to generate labels: ${response.statusCode} - ${response.body}');
+        }
+      }
+    } catch (e) {
+      print('API Error in generateLabels: $e');
+      if (e.toString().contains('Exception:')) {
+        rethrow;
+      }
+      throw Exception('Network error: $e');
+    }
+  }
+
+  // Update other methods...
+  static String getProductQrCodeUrl(int productId) {
+    return '$baseUrl/api/product/$productId/qr-code'; // Fixed
+  }
+
+  static Future<Map<String, dynamic>> verifyWhatsApp(String phoneNumber) async {
+    try {
+      final response = await http.get(
+        Uri.parse('$baseUrl/api/verify/whatsapp/$phoneNumber'), // Fixed
+        headers: {'Content-Type': 'application/json'},
+      ).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          throw Exception('Connection timeout');
+        },
       );
 
       if (response.statusCode == 200) {
         return json.decode(response.body);
       } else {
-        final errorData = json.decode(response.body);
-        throw Exception(errorData['detail'] ?? 'Failed to create order');
+        throw Exception('Failed to verify WhatsApp: ${response.statusCode}');
       }
     } catch (e) {
+      print('API Error (WhatsApp verification): $e');
       throw Exception('Network error: $e');
     }
   }
+
+  static Future<Map<String, dynamic>> sendWhatsAppMessage(String phoneNumber, String message) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/api/whatsapp/send'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode({
+          'phone_number': phoneNumber,
+          'message': message,
+        }),
+      ).timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {
+          throw Exception('Connection timeout');
+        },
+      );
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        return json.decode(response.body);
+      } else {
+        final errorData = json.decode(response.body);
+        throw Exception(errorData['detail'] ?? errorData['message'] ?? 'Failed to send WhatsApp message');
+      }
+    } catch (e) {
+      print('API Error (WhatsApp send): $e');
+      throw Exception('Network error: $e');
+    }
+  }
+
+  static Future<Map<String, dynamic>> getChallanOptions() async {
+    try {
+      final response = await http.get(
+        Uri.parse('$baseUrl/api/challan/options'),
+        headers: {'Content-Type': 'application/json'},
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body) as Map<String, dynamic>;
+      } else {
+        throw Exception('Failed to load challan options');
+      }
+    } catch (e) {
+      throw Exception('Unable to fetch challan options: $e');
+    }
+  }
+
+  static Future<Challan> createChallan(Map<String, dynamic> challanData) async {
+    try {
+      final response = await http
+          .post(
+        Uri.parse('$baseUrl/api/challans'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode(challanData),
+      )
+          .timeout(
+        const Duration(seconds: 20),
+        onTimeout: () {
+          throw Exception('Request timed out while creating challan');
+        },
+      );
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final jsonData = json.decode(response.body);
+        return Challan.fromJson(jsonData as Map<String, dynamic>);
+      } else {
+        final errorData = json.decode(response.body);
+        throw Exception(errorData['detail'] ??
+            'Failed to create challan (${response.statusCode})');
+      }
+    } catch (e) {
+      if (e.toString().contains('Exception:')) rethrow;
+      throw Exception('Error creating challan: $e');
+    }
+  }
+
+  static Future<Challan> updateChallan(int challanId, Map<String, dynamic> challanData) async {
+    try {
+      final response = await http
+          .put(
+        Uri.parse('$baseUrl/api/challans/$challanId'),
+        headers: {'Content-Type': 'application/json'},
+        body: json.encode(challanData),
+      )
+          .timeout(
+        const Duration(seconds: 20),
+        onTimeout: () {
+          throw Exception('Request timed out while updating challan');
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final jsonData = json.decode(response.body);
+        return Challan.fromJson(jsonData as Map<String, dynamic>);
+      } else {
+        final errorData = json.decode(response.body);
+        throw Exception(errorData['detail'] ??
+            'Failed to update challan (${response.statusCode})');
+      }
+    } catch (e) {
+      if (e.toString().contains('Exception:')) rethrow;
+      throw Exception('Error updating challan: $e');
+    }
+  }
+
+  static Future<List<Challan>> getChallans({
+    String? status,
+    String? search,
+    int limit = 50,
+  }) async {
+    try {
+      final queryParameters = <String, String>{
+        'limit': limit.toString(),
+      };
+      if (status != null && status.isNotEmpty) {
+        queryParameters['status'] = status;
+      }
+      if (search != null && search.isNotEmpty) {
+        queryParameters['search'] = search;
+      }
+
+      final uri = Uri.parse('$baseUrl/api/challans')
+          .replace(queryParameters: queryParameters);
+      final response = await http.get(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final jsonData = json.decode(response.body) as Map<String, dynamic>;
+        final List<dynamic> challansJson =
+            jsonData['challans'] as List<dynamic>? ?? [];
+        return challansJson
+            .map((c) => Challan.fromJson(c as Map<String, dynamic>))
+            .toList();
+      } else {
+        throw Exception('Failed to load challans (${response.statusCode})');
+      }
+    } catch (e) {
+      throw Exception('Error fetching challans: $e');
+    }
+  }
+
+  static Future<Challan> getChallanById(int challanId) async {
+    try {
+      final response = await http.get(
+        Uri.parse('$baseUrl/api/challans/$challanId'),
+        headers: {'Content-Type': 'application/json'},
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        return Challan.fromJson(
+            json.decode(response.body) as Map<String, dynamic>);
+      } else if (response.statusCode == 404) {
+        throw Exception('Challan not found');
+      } else {
+        throw Exception('Failed to load challan (${response.statusCode})');
+      }
+    } catch (e) {
+      throw Exception('Error fetching challan: $e');
+    }
+  }
+
+  static Future<Challan> getChallanByNumber(String challanNumber) async {
+    try {
+      final response = await http.get(
+        Uri.parse(
+            '$baseUrl/api/challans/by-number/${Uri.encodeComponent(challanNumber)}'),
+        headers: {'Content-Type': 'application/json'},
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        return Challan.fromJson(
+            json.decode(response.body) as Map<String, dynamic>);
+      } else if (response.statusCode == 404) {
+        throw Exception('Challan not found');
+      } else {
+        throw Exception('Failed to load challan (${response.statusCode})');
+      }
+    } catch (e) {
+      throw Exception('Error fetching challan: $e');
+    }
+  }
+
+  static String getChallanQrUrl(int challanId) {
+    return '$baseUrl/api/challans/$challanId/qr';
+  }
+
+  static String getChallanQrUrlByNumber(String challanNumber) {
+    return '$baseUrl/api/challans/qr/${Uri.encodeComponent(challanNumber)}';
+  }
+
+  static Future<Map<String, String?>?> getPartyDataFromOrders(String partyName) async {
+    try {
+      final response = await http.get(
+        Uri.parse(
+            '$baseUrl/api/orders/party-data/${Uri.encodeComponent(partyName)}'),
+        headers: {'Content-Type': 'application/json'},
+      ).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final jsonData = json.decode(response.body) as Map<String, dynamic>;
+        // Handle null values and convert to String if needed
+        String? station = jsonData['station']?.toString();
+        String? phoneNumber = jsonData['phone_number']?.toString();
+        String? priceCategory = jsonData['price_category']?.toString();
+        String? transportName = jsonData['transport_name']?.toString();
+        
+        return {
+          'station': (station != null && station.isNotEmpty) ? station : null,
+          'phone_number': (phoneNumber != null && phoneNumber.isNotEmpty) ? phoneNumber : null,
+          'price_category': (priceCategory != null && priceCategory.isNotEmpty) ? priceCategory : null,
+          'transport_name': (transportName != null && transportName.isNotEmpty) ? transportName : null,
+        };
+      } else if (response.statusCode == 404) {
+        if (kDebugMode) {
+          print('No party data found for: $partyName');
+        }
+        return null; // No data found
+      } else {
+        throw Exception('Failed to load party data (${response.statusCode})');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('Error fetching party data from orders: $e');
+      }
+      return null; // Return null on error instead of throwing
+    }
+  }
 }
-
-

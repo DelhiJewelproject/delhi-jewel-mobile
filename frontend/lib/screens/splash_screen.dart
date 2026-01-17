@@ -40,7 +40,8 @@ class _SplashScreenState extends State<SplashScreen>
           PageRouteBuilder(
             pageBuilder: (context, animation, secondaryAnimation) =>
                 const MainScreen(),
-            transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            transitionsBuilder:
+                (context, animation, secondaryAnimation, child) {
               return FadeTransition(opacity: animation, child: child);
             },
             transitionDuration: const Duration(milliseconds: 500),
@@ -91,12 +92,12 @@ class _SplashScreenState extends State<SplashScreen>
                             borderRadius: BorderRadius.circular(30),
                             boxShadow: [
                               BoxShadow(
-                                color: const Color(0xFFD4AF37).withOpacity(0.5),
+                                color: const Color(0xFFB8860B).withOpacity(0.5),
                                 blurRadius: 40,
                                 spreadRadius: 10,
                               ),
                               BoxShadow(
-                                color: const Color(0xFFD4AF37).withOpacity(0.3),
+                                color: const Color(0xFFB8860B).withOpacity(0.3),
                                 blurRadius: 60,
                                 spreadRadius: 20,
                               ),
@@ -110,7 +111,7 @@ class _SplashScreenState extends State<SplashScreen>
                             fit: BoxFit.contain,
                             placeholder: (context, url) =>
                                 const CircularProgressIndicator(
-                              color: Color(0xFFD4AF37),
+                              color: Color(0xFFB8860B),
                               strokeWidth: 3,
                             ),
                             errorWidget: (context, url, error) => Container(
@@ -123,7 +124,7 @@ class _SplashScreenState extends State<SplashScreen>
                               child: const Icon(
                                 Icons.diamond_outlined,
                                 size: 80,
-                                color: Color(0xFFD4AF37),
+                                color: Color(0xFFB8860B),
                               ),
                             ),
                           ),
@@ -133,13 +134,13 @@ class _SplashScreenState extends State<SplashScreen>
                         ShaderMask(
                           shaderCallback: (bounds) => const LinearGradient(
                             colors: [
-                              Color(0xFFD4AF37),
-                              Color(0xFFFFD700),
-                              Color(0xFFD4AF37),
+                              Color(0xFFB8860B),
+                              Color(0xFFC9A227),
+                              Color(0xFFB8860B),
                             ],
                           ).createShader(bounds),
                           child: const Text(
-                            'Delhi Jewel',
+                            'Deco Jewel',
                             style: TextStyle(
                               fontSize: 42,
                               fontWeight: FontWeight.bold,
@@ -149,15 +150,15 @@ class _SplashScreenState extends State<SplashScreen>
                           ),
                         ),
                         const SizedBox(height: 16),
-                        const Text(
-                          'Premium Jewelry Collection',
-                          style: TextStyle(
-                            fontSize: 18,
-                            color: Colors.white70,
-                            letterSpacing: 2,
-                            fontWeight: FontWeight.w300,
-                          ),
-                        ),
+                        // const Text(
+                        //   'Premium Deco Collection',
+                        //   style: TextStyle(
+                        //     fontSize: 18,
+                        //     color: Colors.white70,
+                        //     letterSpacing: 2,
+                        //     fontWeight: FontWeight.w300,
+                        //   ),
+                        // ),
                         const SizedBox(height: 80),
                         // Loading indicator with custom styling
                         Container(
@@ -170,7 +171,7 @@ class _SplashScreenState extends State<SplashScreen>
                             width: 40,
                             height: 40,
                             child: CircularProgressIndicator(
-                              color: Color(0xFFD4AF37),
+                              color: Color(0xFFB8860B),
                               strokeWidth: 3,
                             ),
                           ),
@@ -187,5 +188,3 @@ class _SplashScreenState extends State<SplashScreen>
     );
   }
 }
-
-
