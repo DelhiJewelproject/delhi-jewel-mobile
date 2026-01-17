@@ -6,6 +6,7 @@ import '../services/api_service.dart';
 import '../models/product.dart';
 import '../models/product_size.dart';
 import '../models/cart_item.dart';
+import 'order_form_screen.dart';
 
 class ViewScreen extends StatefulWidget {
   const ViewScreen({super.key});
@@ -20,6 +21,7 @@ class _ViewScreenState extends State<ViewScreen> {
     facing: CameraFacing.back,
   );
   final TextEditingController _barcodeController = TextEditingController();
+  final TextEditingController _productIdController = TextEditingController();
   
   bool isScanning = false;
   String? lastScannedCode;
@@ -141,6 +143,7 @@ class _ViewScreenState extends State<ViewScreen> {
   void dispose() {
     cameraController.dispose();
     _barcodeController.dispose();
+    _productIdController.dispose();
     super.dispose();
   }
 
@@ -153,7 +156,10 @@ class _ViewScreenState extends State<ViewScreen> {
     final String? barcode = barcodes.first.rawValue;
     if (barcode == null || barcode.isEmpty) return;
     
+    // Prevent duplicate scans - only block if same code was just scanned
     if (lastScannedCode == barcode) return;
+    
+    // Set lastScannedCode immediately to prevent duplicate detection
     lastScannedCode = barcode;
 
     setState(() {
@@ -239,6 +245,108 @@ class _ViewScreenState extends State<ViewScreen> {
     });
   }
 
+  void _resetScanner() {
+    setState(() {
+      lastScannedCode = null;
+      isScanning = false;
+    });
+    
+    // Temporarily stop and restart the camera to reset detection
+    if (cameraInitialized && cameraController.isStarting == false) {
+      cameraController.stop().then((_) {
+        Future.delayed(const Duration(milliseconds: 100), () {
+          if (mounted) {
+            cameraController.start();
+          }
+        });
+      });
+    }
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Scanner reset. Ready to scan again.'),
+        duration: Duration(seconds: 1),
+      ),
+    );
+  }
+
+  Future<void> _searchProductById(String productId) async {
+    if (productId.isEmpty) return;
+    
+    setState(() {
+      isScanning = true;
+    });
+
+    try {
+      // Search by barcode/ID (API searches both external_id and qr_code)
+      final product = await ApiService.getProductByBarcode(productId.trim());
+      
+      if (mounted) {
+        // Check if product already in cart
+        final existingIndex = cartItems.indexWhere(
+          (item) => item.product.id == product.id
+        );
+        
+        if (existingIndex >= 0) {
+          // Product already in cart, increase quantity
+          setState(() {
+            cartItems[existingIndex].quantity++;
+            isScanning = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${product.name} quantity increased'),
+              backgroundColor: const Color(0xFF10B981),
+              duration: const Duration(seconds: 1),
+            ),
+          );
+        } else {
+          // New product - add to cart with first available size
+          setState(() {
+            if (product.sizes != null && product.sizes!.isNotEmpty) {
+              cartItems.add(CartItem(
+                product: product,
+                selectedSize: product.sizes!.first,
+                quantity: 1,
+              ));
+            } else {
+              cartItems.add(CartItem(
+                product: product,
+                selectedSize: null,
+                quantity: 1,
+              ));
+            }
+            isScanning = false;
+          });
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${product.name} added to cart'),
+              backgroundColor: const Color(0xFF10B981),
+              duration: const Duration(seconds: 1),
+            ),
+          );
+        }
+        
+        // Clear the input field
+        _productIdController.clear();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Product not found: ${e.toString()}'),
+            backgroundColor: Colors.red.shade600,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+        setState(() {
+          isScanning = false;
+        });
+      }
+    }
+  }
+
   double get _totalCartAmount {
     return cartItems.fold(0.0, (sum, item) => sum + item.totalPrice);
   }
@@ -247,14 +355,16 @@ class _ViewScreenState extends State<ViewScreen> {
   Widget build(BuildContext context) {
     if (kIsWeb) {
       return Scaffold(
+        backgroundColor: Colors.black,
         body: Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [
-                const Color(0xFF1A1A2E),
-                const Color(0xFF16213E),
+                Colors.black,
+                const Color(0xFF0A0A0A),
+                Colors.black,
               ],
             ),
           ),
@@ -268,11 +378,13 @@ class _ViewScreenState extends State<ViewScreen> {
                     Container(
                       padding: const EdgeInsets.all(24),
                       decoration: BoxDecoration(
-                        color: Colors.white,
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFFD4AF37), Color(0xFFFFD700)],
+                        ),
                         borderRadius: BorderRadius.circular(30),
                         boxShadow: [
                           BoxShadow(
-                            color: const Color(0xFF6366F1).withOpacity(0.3),
+                            color: const Color(0xFFD4AF37).withOpacity(0.5),
                             blurRadius: 30,
                             spreadRadius: 5,
                           ),
@@ -281,35 +393,55 @@ class _ViewScreenState extends State<ViewScreen> {
                       child: const Icon(
                         Icons.qr_code_scanner_rounded,
                         size: 80,
-                        color: Color(0xFF6366F1),
+                        color: Colors.black,
                       ),
                     ),
                     const SizedBox(height: 40),
-                    const Text(
-                      'Enter Product Barcode',
-                      style: TextStyle(
-                        fontSize: 28,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
+                    ShaderMask(
+                      shaderCallback: (bounds) => const LinearGradient(
+                        colors: [Color(0xFFD4AF37), Color(0xFFFFD700)],
+                      ).createShader(bounds),
+                      child: const Text(
+                        'Enter Product Barcode',
+                        style: TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 40),
                     Container(
                       padding: const EdgeInsets.all(24),
                       decoration: BoxDecoration(
-                        color: Colors.white,
+                        color: const Color(0xFF1A1A1A),
                         borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                          color: const Color(0xFFD4AF37).withOpacity(0.3),
+                          width: 1,
+                        ),
                       ),
                       child: TextField(
                         controller: _barcodeController,
+                        style: const TextStyle(color: Colors.white),
                         decoration: InputDecoration(
                           labelText: 'Barcode / QR Code',
-                          prefixIcon: const Icon(Icons.qr_code_rounded),
+                          labelStyle: const TextStyle(color: Colors.white70),
+                          prefixIcon: const Icon(Icons.qr_code_rounded, color: Color(0xFFD4AF37)),
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(16),
+                            borderSide: BorderSide(color: Colors.grey.shade800),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            borderSide: BorderSide(color: Colors.grey.shade800),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            borderSide: const BorderSide(color: Color(0xFFD4AF37), width: 2),
                           ),
                           filled: true,
-                          fillColor: Colors.grey.shade50,
+                          fillColor: const Color(0xFF1A1A1A),
                         ),
                         onSubmitted: (value) async {
                           if (value.isEmpty) return;
@@ -377,7 +509,7 @@ class _ViewScreenState extends State<ViewScreen> {
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 const CircularProgressIndicator(
-                                  color: Color(0xFF6366F1),
+                                  color: Color(0xFFD4AF37),
                                 ),
                                 const SizedBox(height: 20),
                                 const Text(
@@ -391,7 +523,8 @@ class _ViewScreenState extends State<ViewScreen> {
                                 ElevatedButton(
                                   onPressed: _initializeCamera,
                                   style: ElevatedButton.styleFrom(
-                                    backgroundColor: const Color(0xFF6366F1),
+                                    backgroundColor: const Color(0xFFD4AF37),
+                                    foregroundColor: Colors.black,
                                   ),
                                   child: const Text('Retry Camera'),
                                 ),
@@ -415,7 +548,7 @@ class _ViewScreenState extends State<ViewScreen> {
                       ),
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(
-                        color: const Color(0xFF6366F1).withOpacity(0.5),
+                        color: const Color(0xFFD4AF37).withOpacity(0.5),
                         width: 2,
                       ),
                     ),
@@ -425,13 +558,13 @@ class _ViewScreenState extends State<ViewScreen> {
                           padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
                             gradient: const LinearGradient(
-                              colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
+                              colors: [Color(0xFFD4AF37), Color(0xFFFFD700)],
                             ),
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: const Icon(
                             Icons.qr_code_scanner_rounded,
-                            color: Colors.white,
+                            color: Colors.black,
                             size: 20,
                           ),
                         ),
@@ -446,19 +579,40 @@ class _ViewScreenState extends State<ViewScreen> {
                             ),
                           ),
                         ),
+                        // Refresh button to reset scanner
+                        Container(
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFFD4AF37), Color(0xFFFFD700)],
+                            ),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: IconButton(
+                            icon: const Icon(
+                              Icons.refresh_rounded,
+                              color: Colors.black,
+                              size: 20,
+                            ),
+                            onPressed: _resetScanner,
+                            tooltip: 'Reset Scanner',
+                            padding: const EdgeInsets.all(8),
+                            constraints: const BoxConstraints(),
+                          ),
+                        ),
                         if (cartItems.isNotEmpty)
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                             decoration: BoxDecoration(
                               gradient: const LinearGradient(
-                                colors: [Color(0xFF10B981), Color(0xFF059669)],
+                                colors: [Color(0xFFD4AF37), Color(0xFFFFD700)],
                               ),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
                               '${cartItems.length}',
                               style: const TextStyle(
-                                color: Colors.white,
+                                color: Colors.black,
                                 fontWeight: FontWeight.bold,
                                 fontSize: 14,
                               ),
@@ -475,10 +629,92 @@ class _ViewScreenState extends State<ViewScreen> {
                     color: Colors.black.withOpacity(0.7),
                     child: const Center(
                       child: CircularProgressIndicator(
-                        color: Color(0xFF6366F1),
+                        color: Color(0xFFD4AF37),
                       ),
                     ),
                   ),
+              ],
+            ),
+          ),
+          
+          // ID Search Input Field
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A1A1A),
+              border: Border(
+                top: BorderSide(
+                  color: const Color(0xFFD4AF37).withOpacity(0.2),
+                  width: 1,
+                ),
+                bottom: BorderSide(
+                  color: const Color(0xFFD4AF37).withOpacity(0.2),
+                  width: 1,
+                ),
+              ),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _productIdController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: 'Search by Product ID',
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      hintText: 'Enter product ID',
+                      hintStyle: TextStyle(color: Colors.white.withOpacity(0.5)),
+                      prefixIcon: const Icon(
+                        Icons.search_rounded,
+                        color: Color(0xFFD4AF37),
+                      ),
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.clear, color: Color(0xFFD4AF37)),
+                        onPressed: () {
+                          _productIdController.clear();
+                          setState(() {});
+                        },
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: Colors.grey.shade800),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: Colors.grey.shade800),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: Color(0xFFD4AF37), width: 2),
+                      ),
+                      filled: true,
+                      fillColor: const Color(0xFF0A0A0A),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    ),
+                    onChanged: (value) {
+                      setState(() {});
+                    },
+                    onSubmitted: (value) {
+                      _searchProductById(value);
+                    },
+                    textInputAction: TextInputAction.search,
+                    keyboardType: TextInputType.number,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFFD4AF37), Color(0xFFFFD700)],
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: IconButton(
+                    icon: const Icon(Icons.search, color: Colors.black),
+                    onPressed: () => _searchProductById(_productIdController.text),
+                    tooltip: 'Search Product',
+                  ),
+                ),
               ],
             ),
           ),
@@ -488,18 +724,25 @@ class _ViewScreenState extends State<ViewScreen> {
             flex: 3,
             child: Container(
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: const Color(0xFF1A1A1A),
                 borderRadius: const BorderRadius.only(
                   topLeft: Radius.circular(30),
                   topRight: Radius.circular(30),
                 ),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.1),
+                    color: const Color(0xFFD4AF37).withOpacity(0.3),
                     blurRadius: 20,
+                    spreadRadius: 2,
                     offset: const Offset(0, -5),
                   ),
                 ],
+                border: Border(
+                  top: BorderSide(
+                    color: const Color(0xFFD4AF37).withOpacity(0.3),
+                    width: 1,
+                  ),
+                ),
               ),
               child: Column(
                 children: [
@@ -508,7 +751,7 @@ class _ViewScreenState extends State<ViewScreen> {
                     padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
                       gradient: const LinearGradient(
-                        colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
+                        colors: [Color(0xFFD4AF37), Color(0xFFFFD700)],
                       ),
                       borderRadius: const BorderRadius.only(
                         topLeft: Radius.circular(30),
@@ -517,7 +760,7 @@ class _ViewScreenState extends State<ViewScreen> {
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.shopping_cart_rounded, color: Colors.white, size: 24),
+                        const Icon(Icons.shopping_cart_rounded, color: Colors.black, size: 24),
                         const SizedBox(width: 12),
                         Expanded(
                           child: Column(
@@ -526,7 +769,7 @@ class _ViewScreenState extends State<ViewScreen> {
                               const Text(
                                 'Scanned Products',
                                 style: TextStyle(
-                                  color: Colors.white,
+                                  color: Colors.black,
                                   fontSize: 20,
                                   fontWeight: FontWeight.bold,
                                 ),
@@ -534,29 +777,55 @@ class _ViewScreenState extends State<ViewScreen> {
                               Text(
                                 '${cartItems.length} item${cartItems.length != 1 ? 's' : ''}',
                                 style: TextStyle(
-                                  color: Colors.white.withOpacity(0.9),
+                                  color: Colors.black.withOpacity(0.8),
                                   fontSize: 14,
                                 ),
                               ),
                             ],
                           ),
                         ),
-                        if (cartItems.isNotEmpty)
+                        if (cartItems.isNotEmpty) ...[
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                             decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.2),
+                              color: Colors.black.withOpacity(0.3),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
                               '₹${_totalCartAmount.toStringAsFixed(2)}',
                               style: const TextStyle(
-                                color: Colors.white,
+                                color: Colors.black,
                                 fontWeight: FontWeight.bold,
                                 fontSize: 18,
                               ),
                             ),
                           ),
+                          const SizedBox(width: 8),
+                          Container(
+                            decoration: BoxDecoration(
+                              color: Colors.black.withOpacity(0.3),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: Colors.black.withOpacity(0.5),
+                                width: 2,
+                              ),
+                            ),
+                            child: IconButton(
+                              icon: const Icon(Icons.shopping_cart_checkout, color: Colors.black),
+                              onPressed: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (context) => OrderFormScreen(
+                                      initialCartItems: cartItems,
+                                    ),
+                                  ),
+                                );
+                              },
+                              tooltip: 'Create Order',
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -571,13 +840,13 @@ class _ViewScreenState extends State<ViewScreen> {
                                 Icon(
                                   Icons.qr_code_scanner_outlined,
                                   size: 80,
-                                  color: Colors.grey.shade300,
+                                  color: const Color(0xFFD4AF37).withOpacity(0.5),
                                 ),
                                 const SizedBox(height: 20),
                                 Text(
                                   'Scan products to add them here',
                                   style: TextStyle(
-                                    color: Colors.grey.shade600,
+                                    color: Colors.white.withOpacity(0.6),
                                     fontSize: 16,
                                   ),
                                 ),
@@ -608,13 +877,17 @@ class _ViewScreenState extends State<ViewScreen> {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFF2D2D2D),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(
+          color: const Color(0xFFD4AF37).withOpacity(0.3),
+          width: 1,
+        ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: const Color(0xFFD4AF37).withOpacity(0.1),
             blurRadius: 10,
+            spreadRadius: 1,
             offset: const Offset(0, 2),
           ),
         ],
@@ -635,7 +908,7 @@ class _ViewScreenState extends State<ViewScreen> {
                         style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
-                          color: Color(0xFF1E293B),
+                          color: Colors.white,
                         ),
                       ),
                       if (product.categoryName != null)
@@ -644,13 +917,17 @@ class _ViewScreenState extends State<ViewScreen> {
                           child: Container(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF6366F1).withOpacity(0.1),
+                              color: const Color(0xFFD4AF37).withOpacity(0.2),
                               borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: const Color(0xFFD4AF37).withOpacity(0.5),
+                                width: 1,
+                              ),
                             ),
                             child: Text(
                               product.categoryName!,
                               style: const TextStyle(
-                                color: Color(0xFF6366F1),
+                                color: Color(0xFFD4AF37),
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
                               ),
@@ -677,14 +954,14 @@ class _ViewScreenState extends State<ViewScreen> {
                 children: [
                   const Row(
                     children: [
-                      Icon(Icons.straighten_outlined, size: 18, color: Color(0xFF6366F1)),
+                      Icon(Icons.straighten_outlined, size: 18, color: Color(0xFFD4AF37)),
                       SizedBox(width: 8),
                       Text(
                         'Select Size & Price Tier:',
                         style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
-                          color: Color(0xFF1E293B),
+                          color: Colors.white,
                         ),
                       ),
                     ],
@@ -706,13 +983,13 @@ class _ViewScreenState extends State<ViewScreen> {
                           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                           decoration: BoxDecoration(
                             color: isSelected
-                                ? const Color(0xFF6366F1)
-                                : Colors.grey.shade100,
+                                ? const Color(0xFFD4AF37)
+                                : const Color(0xFF1A1A1A),
                             borderRadius: BorderRadius.circular(10),
                             border: Border.all(
                               color: isSelected
-                                  ? const Color(0xFF6366F1)
-                                  : Colors.grey.shade300,
+                                  ? const Color(0xFFD4AF37)
+                                  : Colors.grey.shade700,
                               width: isSelected ? 2.5 : 1,
                             ),
                           ),
@@ -721,7 +998,7 @@ class _ViewScreenState extends State<ViewScreen> {
                             style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.bold,
-                              color: isSelected ? Colors.white : const Color(0xFF1E293B),
+                              color: isSelected ? Colors.black : Colors.white,
                             ),
                           ),
                         ),
@@ -734,19 +1011,22 @@ class _ViewScreenState extends State<ViewScreen> {
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: Colors.grey.shade50,
+                        color: const Color(0xFF1A1A1A),
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.grey.shade200),
+                        border: Border.all(
+                          color: const Color(0xFFD4AF37).withOpacity(0.3),
+                          width: 1,
+                        ),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
                             'Price Tiers for ${item.selectedSize!.sizeText ?? "Selected Size"}:',
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.w600,
-                              color: Color(0xFF64748B),
+                              color: Colors.white.withOpacity(0.8),
                             ),
                           ),
                           const SizedBox(height: 10),
@@ -780,10 +1060,16 @@ class _ViewScreenState extends State<ViewScreen> {
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: Colors.grey.shade50,
+              color: const Color(0xFF1A1A1A),
               borderRadius: const BorderRadius.only(
                 bottomLeft: Radius.circular(16),
                 bottomRight: Radius.circular(16),
+              ),
+              border: Border(
+                top: BorderSide(
+                  color: const Color(0xFFD4AF37).withOpacity(0.2),
+                  width: 1,
+                ),
               ),
             ),
             child: Row(
@@ -791,16 +1077,19 @@ class _ViewScreenState extends State<ViewScreen> {
                 // Quantity Controls
                 Container(
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: const Color(0xFF2D2D2D),
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey.shade300),
+                    border: Border.all(
+                      color: const Color(0xFFD4AF37).withOpacity(0.5),
+                      width: 1,
+                    ),
                   ),
                   child: Row(
                     children: [
                       IconButton(
                         icon: const Icon(Icons.remove, size: 20),
                         onPressed: () => _updateQuantity(index, -1),
-                        color: const Color(0xFF6366F1),
+                        color: const Color(0xFFD4AF37),
                       ),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -809,14 +1098,14 @@ class _ViewScreenState extends State<ViewScreen> {
                           style: const TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
-                            color: Color(0xFF1E293B),
+                            color: Colors.white,
                           ),
                         ),
                       ),
                       IconButton(
                         icon: const Icon(Icons.add, size: 20),
                         onPressed: () => _updateQuantity(index, 1),
-                        color: const Color(0xFF6366F1),
+                        color: const Color(0xFFD4AF37),
                       ),
                     ],
                   ),
@@ -830,7 +1119,7 @@ class _ViewScreenState extends State<ViewScreen> {
                       'Total',
                       style: TextStyle(
                         fontSize: 12,
-                        color: Colors.grey.shade600,
+                        color: Colors.white.withOpacity(0.6),
                       ),
                     ),
                     Text(
@@ -838,7 +1127,7 @@ class _ViewScreenState extends State<ViewScreen> {
                       style: const TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
-                        color: Color(0xFF6366F1),
+                        color: Color(0xFFD4AF37),
                       ),
                     ),
                   ],
