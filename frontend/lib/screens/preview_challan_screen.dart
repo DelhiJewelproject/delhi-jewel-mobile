@@ -1057,6 +1057,8 @@ class _PreviewChallanScreenState extends State<PreviewChallanScreen> {
                 width: 200,
                 height: 200,
                 fit: BoxFit.contain,
+                cacheWidth: 400,
+                cacheHeight: 400,
                 loadingBuilder: (context, child, loadingProgress) {
                   if (loadingProgress == null) return child;
                   return Container(

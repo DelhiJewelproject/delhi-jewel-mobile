@@ -11,6 +11,7 @@ import '../services/local_storage_service.dart';
 import 'check_price_manual_screen.dart';
 import 'challan_product_selection_screen.dart';
 import 'item_info_challan_screen.dart';
+import 'main_screen.dart';
 
 class ChallanSelectionScanScreen extends StatefulWidget {
   final String? partyName;
@@ -108,6 +109,90 @@ class _ChallanSelectionScanScreenState
       if (!mounted) return;
       setState(() => _isLoading = false);
       // Silently fail - draft challans might not exist yet
+    }
+  }
+
+  /// True if current screen has a new challan from form (so we may show cancel dialog).
+  bool get _isNewChallanFromForm {
+    if (widget.challanId == null || widget.challanNumber == null) return false;
+    final c = _selectedChallan;
+    return c != null && c.id == widget.challanId;
+  }
+
+  /// Returns true only when challan has no stored items (in memory, local draft, or server).
+  Future<bool> _hasChallanNoStoredItems() async {
+    if (!_isNewChallanFromForm) return false;
+    final c = _selectedChallan!;
+    if (c.items.isNotEmpty) return false;
+    // Check local draft – items are often saved here first (e.g. after ItemInfoChallanScreen OK)
+    final drafts = await LocalStorageService.getDraftChallans();
+    final ourDc = LocalStorageService.extractDcPart(widget.challanNumber ?? '');
+    for (final d in drafts) {
+      final match = (d.id != null && d.id == widget.challanId) ||
+          (ourDc != null &&
+              ourDc.isNotEmpty &&
+              LocalStorageService.extractDcPart(d.challanNumber)?.toUpperCase() == ourDc.toUpperCase());
+      if (match && d.items.isNotEmpty) return false;
+    }
+    try {
+      final fetched = await ApiService.getChallanById(widget.challanId!);
+      return fetched.items.isEmpty;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  void _goToMain() {
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const MainScreen()),
+      (route) => false,
+    );
+  }
+
+  Future<void> _handleBackPressed() async {
+    if (!_isNewChallanFromForm) {
+      _goToMain();
+      return;
+    }
+    final bool noStoredItems = await _hasChallanNoStoredItems();
+    if (!mounted) return;
+    if (!noStoredItems) {
+      _goToMain();
+      return;
+    }
+    final confirm = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel challan?'),
+        content: const Text(
+          'No products selected on this challan. Do you want to cancel this challan?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('No'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Yes'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (confirm == true && widget.challanId != null) {
+      try {
+        await ApiService.deleteChallan(widget.challanId!);
+      } catch (_) {
+        // Still go back even if delete fails
+      }
+      final dc = LocalStorageService.extractDcPart(widget.challanNumber ?? '');
+      if (dc != null && dc.isNotEmpty) {
+        await LocalStorageService.removeDraftChallansByDcNumber(dc);
+      }
+      _goToMain();
     }
   }
 
@@ -353,17 +438,22 @@ class _ChallanSelectionScanScreenState
     final List<ChallanItem> challanItems = [];
 
     if (product.sizes != null && product.sizes!.isNotEmpty) {
-      // Create an item for each size
+      // Create an item for each size, but skip sizes whose price is 0
       for (var size in product.sizes!) {
-        final defaultPrice = _getPriceByCategory(size, priceCategory) ?? size.minPrice ?? 0;
-    final challanItem = ChallanItem(
-      productId: product.id,
-      productName: product.name ?? 'Product',
+        final defaultPrice =
+            _getPriceByCategory(size, priceCategory) ?? size.minPrice ?? 0;
+        // Filter out sizes with zero or negative price – don't show them in the table
+        if (defaultPrice <= 0) {
+          continue;
+        }
+        final challanItem = ChallanItem(
+          productId: product.id,
+          productName: product.name ?? 'Product',
           sizeId: size.id,
           sizeText: size.sizeText,
-      quantity: 0,
-      unitPrice: defaultPrice,
-    );
+          quantity: 0,
+          unitPrice: defaultPrice,
+        );
         challanItems.add(challanItem);
       }
     } else {
@@ -528,14 +618,19 @@ class _ChallanSelectionScanScreenState
     final screenSize = MediaQuery.of(context).size;
     final isMobile = screenSize.width < 600;
 
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _handleBackPressed();
+      },
+      child: Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.white,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF1A1A1A)),
-          onPressed: () => Navigator.pop(context),
+          onPressed: _handleBackPressed,
         ),
         title: const Text(
           'Select Challan',
@@ -970,6 +1065,7 @@ class _ChallanSelectionScanScreenState
                 ],
               ),
       ),
+    ),
     );
   }
 }

@@ -309,20 +309,26 @@ class _ProductsListScreenState extends State<ProductsListScreen>
             ),
           ),
           const SizedBox(height: 12),
-          // Category filter
+          // Category filter (ListView.builder for performance with many categories)
           if (_categories.isNotEmpty)
             SizedBox(
               height: 40,
-              child: ListView(
+              child: ListView.builder(
                 scrollDirection: Axis.horizontal,
-                children: [
-                  _buildCategoryChip('All', null),
-                  const SizedBox(width: 8),
-                  ..._categories.map((cat) => Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: _buildCategoryChip(cat, cat),
-                      )),
-                ],
+                itemCount: 1 + _categories.length,
+                itemBuilder: (context, index) {
+                  if (index == 0) {
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: _buildCategoryChip('All', null),
+                    );
+                  }
+                  final cat = _categories[index - 1];
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: _buildCategoryChip(cat, cat),
+                  );
+                },
               ),
             ),
         ],

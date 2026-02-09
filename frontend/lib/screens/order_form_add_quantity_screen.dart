@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_typeahead/flutter_typeahead.dart';
 import '../models/challan.dart';
@@ -63,8 +64,7 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
   
   // Design selection state for Melody product
   bool _isOptionA = false; // Default to Option B (manual selection) - Option A/B selector is hidden
-  final List<String> _allDesigns = ['ACK', 'BLK', 'BLC', 'CNC', 'BCC', 'DK', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6'];
-  final List<String> _staticDesigns = ['D1', 'D2', 'D3']; // Static designs shown for all products
+  final List<String> _staticDesigns = ['D1', 'D2', 'D3']; // Static designs shown when product has no designs
   // Map<sizeKey, Map<design, quantity>> - temporary memory for each size
   final Map<String, Map<String, int>> _sizeDesignAllocations = {};
   // Map<sizeKey, Map<design, quantity>> - current UI state for each size
@@ -73,6 +73,13 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
   int? _currentlyEditingSizeIndex;
   // Map<sizeKey, TextEditingController> for design quantity inputs
   final Map<String, Map<String, TextEditingController>> _designQuantityControllers = {};
+  
+  // Debounce timers to avoid setState on every keystroke (reduces lag)
+  Timer? _quantityDebounceTimer;
+  int? _quantityDebounceIndex;
+  Timer? _designQuantityDebounceTimer;
+  String? _designDebounceSizeKey;
+  String? _designDebounceDesign;
   
   // Flag to prevent multiple auto-restorations in build()
   bool _hasAutoRestoredInBuild = false;
@@ -426,6 +433,8 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
                     ? Image.network(
                         product.imageUrl!,
                         fit: BoxFit.contain,
+                        cacheWidth: 1024,
+                        cacheHeight: 1024,
                         errorBuilder: (context, error, stackTrace) {
                           return _buildFullScreenDemoImage(product);
                         },
@@ -482,25 +491,25 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
     );
   }
 
-  // Check if the product is Melody (by product name)
-  bool _isMelodyProductByName(String? productName) {
-    if (productName == null) return false;
-    return productName.toUpperCase().contains('MELODY');
-  }
-  
-  // Check if a product has its own designs (not just static designs)
+  // Check if a product has its own designs (from product.designs field)
   bool _productHasDesigns(int? productId) {
     if (productId == null) return false;
     
     // First try to find in catalog
     try {
       final product = _catalog.firstWhere((p) => p.id == productId);
-      return _isMelodyProductByName(product.name);
+      return product.designs != null && product.designs!.isNotEmpty;
     } catch (e) {
       // If not in catalog, try to find in items
       try {
         final item = _items.firstWhere((item) => item.productId == productId);
-        return _isMelodyProductByName(item.productName);
+        // Try to find product in catalog by name
+        try {
+          final product = _catalog.firstWhere((p) => p.name == item.productName);
+          return product.designs != null && product.designs!.isNotEmpty;
+        } catch (e) {
+          return false;
+        }
       } catch (e) {
         // Product not found, default to no designs
         return false;
@@ -508,26 +517,59 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
     }
   }
   
+  // Get actual designs for a product
+  List<String> _getProductDesigns(int? productId) {
+    if (productId == null) return [];
+    
+    try {
+      final product = _catalog.firstWhere((p) => p.id == productId);
+      if (product.designs != null && product.designs!.isNotEmpty) {
+        print('✓ Found ${product.designs!.length} designs for product ${productId}: ${product.designs!.join(", ")}');
+        return product.designs!;
+      } else {
+        print('⚠ Product ${productId} has no designs (designs: ${product.designs})');
+      }
+    } catch (e) {
+      print('⚠ Error finding product ${productId} in catalog: $e');
+      // If not in catalog, try to find in items
+      try {
+        final item = _items.firstWhere((item) => item.productId == productId);
+        // Try to find product in catalog by name
+        try {
+          final product = _catalog.firstWhere((p) => p.name == item.productName);
+          if (product.designs != null && product.designs!.isNotEmpty) {
+            print('✓ Found ${product.designs!.length} designs for product by name: ${product.designs!.join(", ")}');
+            return product.designs!;
+          }
+        } catch (e) {
+          print('⚠ Error finding product by name: $e');
+          return [];
+        }
+      } catch (e) {
+        print('⚠ Error finding item: $e');
+        return [];
+      }
+    }
+    return [];
+  }
+  
   // Get designs to show for a specific product
-  // If product has designs (like Melody), show those (excluding static)
-  // Otherwise, show static designs
+  // If product has designs, show those actual designs
+  // Otherwise, show static designs (D1, D2, D3)
   List<String> _getDesignsToShow({int? productId}) {
     // If productId is provided, check that specific product
     // Otherwise, check the selected product (for backward compatibility)
-    bool hasDesigns;
-    if (productId != null) {
-      hasDesigns = _productHasDesigns(productId);
-    } else {
-      // Fallback to selected product check
-      hasDesigns = _isMelodyProductByName(widget.selectedProduct.name);
+    int? idToCheck = productId ?? widget.selectedProduct.id;
+    
+    if (idToCheck != null) {
+      final productDesigns = _getProductDesigns(idToCheck);
+      if (productDesigns.isNotEmpty) {
+        // Product has its own designs - show those actual designs
+        return productDesigns;
+      }
     }
     
-    if (hasDesigns) {
-      // Product has its own designs - show those, excluding static designs
-      return _allDesigns.where((design) => !_staticDesigns.contains(design)).toList();
-    }
-    
-    // Product doesn't have its own designs - show static designs only
+    // Product doesn't have its own designs - show static designs only (D1, D2, D3)
     return _staticDesigns;
   }
   
@@ -842,6 +884,8 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
 
   @override
   void dispose() {
+    _quantityDebounceTimer?.cancel();
+    _designQuantityDebounceTimer?.cancel();
     for (var controller in _quantityControllers.values) {
       controller.dispose();
     }
@@ -852,6 +896,56 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
       }
     }
     super.dispose();
+  }
+
+  /// Debounced quantity update - avoids full rebuild on every keystroke.
+  void _scheduleQuantityUpdate(int index, String value) {
+    _quantityDebounceTimer?.cancel();
+    _quantityDebounceIndex = index;
+    _quantityDebounceTimer = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
+      final i = _quantityDebounceIndex;
+      if (i == null) return;
+      final currentValue = _quantityControllers[i]?.text ?? '';
+      _updateQuantity(i, currentValue);
+      _quantityDebounceTimer = null;
+      _quantityDebounceIndex = null;
+    });
+  }
+
+  /// Debounced design quantity update - avoids full rebuild on every keystroke.
+  void _scheduleDesignQuantityUpdate(String sizeKey, String design, String value) {
+    // Empty or would exceed total: update immediately (revert/snackbar or clear)
+    if (value.isEmpty) {
+      _updateDesignQuantity(sizeKey, design, value);
+      return;
+    }
+    final qty = int.tryParse(value) ?? 0;
+    if (qty > 0) {
+      final totalQuantity = _getTotalQuantityForSize(sizeKey);
+      final currentSelections = _currentSizeDesignSelections[sizeKey] ?? {};
+      final currentSum = currentSelections.entries
+          .where((entry) => entry.key != design)
+          .fold(0, (sum, entry) => sum + entry.value);
+      if ((currentSum + qty) > totalQuantity) {
+        _updateDesignQuantity(sizeKey, design, value);
+        return;
+      }
+    }
+    _designQuantityDebounceTimer?.cancel();
+    _designDebounceSizeKey = sizeKey;
+    _designDebounceDesign = design;
+    _designQuantityDebounceTimer = Timer(const Duration(milliseconds: 350), () {
+      if (!mounted) return;
+      final sk = _designDebounceSizeKey;
+      final d = _designDebounceDesign;
+      if (sk == null || d == null) return;
+      final currentValue = _designQuantityControllers[sk]?[d]?.text ?? '';
+      _updateDesignQuantity(sk, d, currentValue);
+      _designQuantityDebounceTimer = null;
+      _designDebounceSizeKey = null;
+      _designDebounceDesign = null;
+    });
   }
 
   // Handle NEXT button - store current items and navigate to add more products
@@ -1572,6 +1666,21 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
   
   // Submit order (extracted from _handleOk)
   Future<void> _submitOrder() async {
+    // First, update all items with quantities from controllers
+    // This ensures we have the latest values from the text fields
+    for (var entry in _quantityControllers.entries) {
+      if (entry.key < _items.length) {
+        final controllerText = entry.value.text.trim();
+        if (controllerText.isNotEmpty) {
+          final quantity = double.tryParse(controllerText) ?? 0;
+          if (quantity > 0) {
+            final item = _items[entry.key];
+            _items[entry.key] = item.copyWith(quantity: quantity);
+          }
+        }
+      }
+    }
+    
     // Filter items based on current tab
     List<ChallanItem> itemsWithQuantity;
     
@@ -1631,10 +1740,43 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
       String actualOrderNumber = widget.orderNumber;
       
       // Prepare order items from challan items
-      final orderItems = itemsWithQuantity.map((item) {
+      // Filter out items with null productId - these cannot be processed by backend
+      final validItems = itemsWithQuantity.where((item) => 
+        item.productId != null && 
+        item.quantity > 0 &&
+        item.unitPrice > 0
+      ).toList();
+      
+      if (validItems.isEmpty) {
+        if (!mounted) return;
+        setState(() => _isSubmitting = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please ensure all items have valid product information and quantity > 0'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+      
+      final orderItems = validItems.map((item) {
+        // Prefer sending the real external_id from catalog, so backend can resolve correctly
+        int? externalId;
+        if (item.productId != null && _catalog.isNotEmpty) {
+          try {
+            final product = _catalog.firstWhere((p) => p.id == item.productId);
+            externalId = product.externalId;
+            print('Found externalId for product ${item.productId}: $externalId');
+          } catch (e) {
+            print('Warning: Product ${item.productId} not found in catalog (${_catalog.length} products available)');
+            externalId = null;
+          }
+        }
+        // Only send externalId if it's numeric, otherwise let backend use name lookup
+        final externalIdValue = (externalId != null) ? externalId : null;
         return {
           'product_id': item.productId,
-          'product_external_id': item.productName, // Use product name as external ID fallback
+          'product_external_id': externalIdValue, // Send null if not available, backend will use name
           'product_name': item.productName,
           'size_id': item.sizeId,
           'size_text': item.sizeText ?? '',
@@ -1642,6 +1784,14 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
           'unit_price': item.unitPrice,
         };
       }).toList();
+      
+      // Debug logging
+      print('=== SUBMITTING ORDER ===');
+      print('Valid items count: ${validItems.length}');
+      for (var item in validItems) {
+        print('Item: ${item.productName} - productId: ${item.productId}, sizeId: ${item.sizeId}, quantity: ${item.quantity}, unitPrice: ${item.unitPrice}');
+      }
+      print('Order items to send: $orderItems');
       
       // Always send items to backend - if order exists, items will be added to it
       // If order doesn't exist (PENDING), a new order will be created
@@ -1654,6 +1804,8 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
       if (widget.orderNumber != 'PENDING') {
         orderData['order_number'] = widget.orderNumber;
       }
+      
+      print('Full order data being sent: $orderData');
       
       final orderResult = await ApiService.createOrderWithMultipleItems(orderData);
       actualOrderNumber = (orderResult['order_number'] ?? widget.orderNumber).toString();
@@ -1751,7 +1903,7 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
     
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
-      resizeToAvoidBottomInset: false, // Prevent keyboard from moving footer buttons
+      resizeToAvoidBottomInset: true, // Resize so keyboard does not overlap content; footer stays above keyboard
       body: SafeArea(
         child: Stack(
           children: [
@@ -1760,26 +1912,23 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
               children: [
                 // Header with Party Name and Order Number (Tabular)
                 _buildHeader(),
-                
-                // Image Selection Section (A/B Selector)
-                _buildImageSelectionSection(),
-                
-                // Table Section
+                // Scrollable: Design section + Table section
                 Expanded(
                   child: SingleChildScrollView(
-                          padding: const EdgeInsets.only(
-                            left: 16,
-                            right: 16,
-                            top: 16,
-                            bottom: 100, // Add padding for fixed footer buttons
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              _buildTableSection(),
-                            ],
-                          ),
-                        ),
+                    padding: const EdgeInsets.only(
+                      left: 16,
+                      right: 16,
+                      top: 16,
+                      bottom: 100, // Add padding for fixed footer buttons
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildImageSelectionSection(),
+                        _buildTableSection(),
+                      ],
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -2247,6 +2396,8 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
                       width: double.infinity,
                       height: double.infinity,
                       fit: BoxFit.cover,
+                      cacheWidth: 400,
+                      cacheHeight: 400,
                       errorBuilder: (context, error, stackTrace) {
                         return Container(
                           color: Colors.grey.shade200,
@@ -2712,7 +2863,7 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
                             color: Color(0xFF1A1A1A),
                           ),
                           onChanged: (value) {
-                            _updateQuantity(index, value);
+                            _scheduleQuantityUpdate(index, value);
                           },
                         ),
                       ),
@@ -2957,22 +3108,43 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
           ),
           const SizedBox(height: 12),
           // Design chips
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: _getDesignsToShow(productId: item.productId).map((design) {
-              final controller = _getDesignController(sizeKey, design);
-              final currentQty = _currentSizeDesignSelections[sizeKey]?[design] ?? 0;
-              final isSelected = currentQty > 0;
+          Builder(
+            builder: (context) {
+              final designsToShow = _getDesignsToShow(productId: item.productId);
+              print('Building design chips for ${item.productName} (ID: ${item.productId}): ${designsToShow.length} designs');
               
-              return _buildDesignChip(
-                design: design,
-                sizeKey: sizeKey,
-                controller: controller,
-                isEnabled: designsEnabled,
-                isSelected: isSelected,
+              if (designsToShow.isEmpty) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(
+                    'No designs available',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey.shade500,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                );
+              }
+              
+              return Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: designsToShow.map((design) {
+                  final controller = _getDesignController(sizeKey, design);
+                  final currentQty = _currentSizeDesignSelections[sizeKey]?[design] ?? 0;
+                  final isSelected = currentQty > 0;
+                  
+                  return _buildDesignChip(
+                    design: design,
+                    sizeKey: sizeKey,
+                    controller: controller,
+                    isEnabled: designsEnabled,
+                    isSelected: isSelected,
+                  );
+                }).toList(),
               );
-            }).toList(),
+            },
           ),
           if (designsEnabled && _currentlyEditingSizeIndex == itemIndex) ...[
             const SizedBox(height: 8),
@@ -3288,8 +3460,8 @@ class _OrderFormAddQuantityScreenState extends State<OrderFormAddQuantityScreen>
                           : Colors.grey.shade400,
                     ),
                     onChanged: (value) {
-                      // Real-time validation - prevents exceeding total
-                      _updateDesignQuantity(sizeKey, design, value);
+                      // Debounced to reduce lag; exceed check still runs immediately
+                      _scheduleDesignQuantityUpdate(sizeKey, design, value);
                     },
                     onEditingComplete: () {
                       // Validate when user presses done/enter

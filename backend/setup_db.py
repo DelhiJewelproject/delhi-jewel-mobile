@@ -87,7 +87,7 @@ def setup_database():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("Delhi Jewel Database Setup")
+    print("DecoJewel Database Setup")
     print("=" * 50)
     success = setup_database()
     sys.exit(0 if success else 1)

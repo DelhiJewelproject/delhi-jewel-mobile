@@ -1,4 +1,4 @@
--- Labels Table for Delhi Jewel
+-- Labels Table for DecoJewel
 -- This table stores label generation requests
 
 CREATE TABLE IF NOT EXISTS labels (

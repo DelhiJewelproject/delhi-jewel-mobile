@@ -46,7 +46,7 @@ class MainScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'Deco Jewel',
+                          'DecoJewels',
                           style: TextStyle(
                             fontSize: isSmallScreen ? 24 : isTablet ? 32 : 28,
                             fontWeight: FontWeight.w800,
@@ -193,9 +193,10 @@ class MainScreen extends StatelessWidget {
     final isTablet = screenSize.width > 600;
     final isSmallScreen = screenSize.width < 360;
     
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
+    return RepaintBoundary(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(20),
         child: Container(
@@ -290,6 +291,7 @@ class MainScreen extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }

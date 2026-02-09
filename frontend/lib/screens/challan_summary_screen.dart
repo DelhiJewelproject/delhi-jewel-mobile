@@ -36,46 +36,48 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
   bool _isSubmitting = false;
   String? _generatedChallanNumber;
   List<ChallanItem> _currentItems = [];
+  /// Set when user has ended this challan – prevents any late _saveDraftChallan from re-adding the draft.
+  bool _hasEndedChallan = false;
 
   @override
   void initState() {
     super.initState();
     // Challan number should always be provided now (created after party details)
     // If not provided, this is an error state
-    if (widget.challanNumber == null || widget.challanNumber!.isEmpty) {
-      print('Warning: Challan number not provided to ChallanSummaryScreen');
-    }
-    _generatedChallanNumber = widget.challanNumber ?? 'ERROR-NO-NUMBER';
+    // If challan number is missing, we just continue with generated DC number.
+    // (Previously logged a warning to console.)
+    // Use DC-only so we match local storage (drafts stored as DC009504)
+    final raw = widget.challanNumber ?? 'ERROR-NO-NUMBER';
+    _generatedChallanNumber = LocalStorageService.extractDcPart(raw) ?? raw;
     _currentItems = List.from(widget.items);
+    
     _saveDraftChallan();
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    // Reload items from local storage when screen becomes visible
-    if (ModalRoute.of(context)?.isCurrent == true) {
-      _reloadItems();
+  /// Find draft by challan number (exact or DC part) so we match storage which uses DC-only.
+  Challan _findDraftOrElse(List<Challan> drafts, Challan orElse) {
+    final dc = LocalStorageService.extractDcPart(_generatedChallanNumber ?? '');
+    for (final c in drafts) {
+      if (c.challanNumber == _generatedChallanNumber) return c;
+      if (dc != null && dc.isNotEmpty && LocalStorageService.extractDcPart(c.challanNumber) == dc) return c;
     }
+    return orElse;
   }
 
   Future<void> _reloadItems() async {
     try {
       final updatedDrafts = await LocalStorageService.getDraftChallans();
-      final updatedDraft = updatedDrafts.firstWhere(
-        (c) => c.challanNumber == _generatedChallanNumber,
-        orElse: () => Challan(
-          id: null,
-          challanNumber: _generatedChallanNumber!,
-          partyName: widget.partyName,
-          stationName: widget.stationName,
-          transportName: widget.transportName,
-          priceCategory: widget.priceCategory,
-          status: 'draft',
-          items: _currentItems,
-        ),
+      final orElse = Challan(
+        id: null,
+        challanNumber: _generatedChallanNumber!,
+        partyName: widget.partyName,
+        stationName: widget.stationName,
+        transportName: widget.transportName,
+        priceCategory: widget.priceCategory,
+        status: 'draft',
+        items: _currentItems,
       );
-      
+      final updatedDraft = _findDraftOrElse(updatedDrafts, orElse);
       if (mounted) {
         setState(() {
           _currentItems = List.from(updatedDraft.items);
@@ -87,10 +89,10 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
   }
 
   Future<void> _saveDraftChallan() async {
-    // Only save to local storage if we have a real challan ID (for backup)
-    // Otherwise, the challan should already be in the database
+    // Never save after we've ended this challan – avoids re-adding draft when a late callback runs
+    if (_hasEndedChallan) return;
     final draftChallan = Challan(
-      id: widget.challanId, // Use real challan ID if available
+      id: widget.challanId,
       challanNumber: _generatedChallanNumber!,
       partyName: widget.partyName,
       stationName: widget.stationName,
@@ -130,14 +132,10 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
       ),
     );
     
-    // When returning, reload draft challan to get updated items
+    // When returning, reload draft from storage (by DC) and update UI + persist
     if (mounted) {
       final updatedDrafts = await LocalStorageService.getDraftChallans();
-      final updatedDraft = updatedDrafts.firstWhere(
-        (c) => c.challanNumber == _generatedChallanNumber,
-        orElse: () => draftChallan,
-      );
-      
+      final updatedDraft = _findDraftOrElse(updatedDrafts, draftChallan);
       if (mounted) {
         setState(() {
           _currentItems = List.from(updatedDraft.items);
@@ -148,21 +146,19 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
   }
 
   Future<void> _handleViewChallan() async {
-    // Reload items from local storage before viewing
+    // Reload items from local storage before viewing (match by DC)
     final updatedDrafts = await LocalStorageService.getDraftChallans();
-    final updatedDraft = updatedDrafts.firstWhere(
-      (c) => c.challanNumber == _generatedChallanNumber,
-      orElse: () => Challan(
-        id: null,
-        challanNumber: _generatedChallanNumber!,
-        partyName: widget.partyName,
-        stationName: widget.stationName,
-        transportName: widget.transportName,
-        priceCategory: widget.priceCategory,
-        status: 'draft',
-        items: _currentItems,
-      ),
+    final orElse = Challan(
+      id: null,
+      challanNumber: _generatedChallanNumber!,
+      partyName: widget.partyName,
+      stationName: widget.stationName,
+      transportName: widget.transportName,
+      priceCategory: widget.priceCategory,
+      status: 'draft',
+      items: _currentItems,
     );
+    final updatedDraft = _findDraftOrElse(updatedDrafts, orElse);
 
     if (!mounted) return;
     await Navigator.push(
@@ -190,24 +186,152 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
   }
 
   Future<void> _handleEndChallan() async {
-    // Reload items from local storage before submitting
-    final updatedDrafts = await LocalStorageService.getDraftChallans();
-    final updatedDraft = updatedDrafts.firstWhere(
-      (c) => c.challanNumber == _generatedChallanNumber,
-      orElse: () => Challan(
-        id: null,
-        challanNumber: _generatedChallanNumber!,
-        partyName: widget.partyName,
-        stationName: widget.stationName,
-        transportName: widget.transportName,
-        priceCategory: widget.priceCategory,
-        status: 'draft',
-        items: _currentItems,
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(24),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.12),
+                blurRadius: 24,
+                offset: const Offset(0, 12),
+              ),
+              BoxShadow(
+                color: const Color(0xFFB8860B).withOpacity(0.08),
+                blurRadius: 16,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 28),
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFB8860B).withOpacity(0.12),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: const Color(0xFFB8860B).withOpacity(0.3),
+                    width: 2,
+                  ),
+                ),
+                child: const Icon(
+                  Icons.check_circle_outline_rounded,
+                  size: 36,
+                  color: Color(0xFFB8860B),
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 20),
+                child: Text(
+                  'End this challan?',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1A1A1A),
+                    letterSpacing: -0.3,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Text(
+                  'This challan will be finalized and marked ready for dispatch. You won’t be able to edit it after this.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    height: 1.45,
+                    color: Colors.grey.shade600,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 28),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.grey.shade700,
+                          side: BorderSide(color: Colors.grey.shade400),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          elevation: 0,
+                        ),
+                        child: const SizedBox(
+                          width: double.infinity,
+                          child: Text(
+                            'Cancel',
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFFB8860B),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          elevation: 0,
+                        ),
+                        child: const SizedBox(
+                          width: double.infinity,
+                          child: Text(
+                            'Yes, End Challan',
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
-    
+    if (confirmed != true || !mounted) return;
+
+    // Use local stored draft (match by DC) so End Challan sends latest items and we remove correct draft
+    final updatedDrafts = await LocalStorageService.getDraftChallans();
+    final orElse = Challan(
+      id: null,
+      challanNumber: _generatedChallanNumber!,
+      partyName: widget.partyName,
+      stationName: widget.stationName,
+      transportName: widget.transportName,
+      priceCategory: widget.priceCategory,
+      status: 'draft',
+      items: _currentItems,
+    );
+    final updatedDraft = _findDraftOrElse(updatedDrafts, orElse);
     final itemsWithQuantity = updatedDraft.items.where((item) => item.quantity > 0).toList();
-    
+
     if (itemsWithQuantity.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -226,11 +350,20 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
       };
 
       Challan challan;
-      // If challan ID exists, update the existing challan; otherwise create new one
-      if (widget.challanId != null) {
-        challan = await ApiService.updateChallan(widget.challanId!, payload);
+      int? challanIdToUse = widget.challanId;
+      // If no local ID, try to resolve from server by challan number (e.g. draft from Old Challans)
+      if (challanIdToUse == null &&
+          _generatedChallanNumber != null &&
+          _generatedChallanNumber!.isNotEmpty) {
+        try {
+          final existing =
+              await ApiService.getChallanByNumber(_generatedChallanNumber!);
+          challanIdToUse = existing.id;
+        } catch (_) {}
+      }
+      if (challanIdToUse != null) {
+        challan = await ApiService.updateChallan(challanIdToUse, payload);
       } else {
-        // Fallback: create new challan if ID is not available
         final createPayload = {
           'party_name': widget.partyName,
           'station_name': widget.stationName,
@@ -255,10 +388,24 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
         fullChallan = challan;
       }
 
-      // Remove from local storage since it's now submitted
-      if (_generatedChallanNumber != null) {
-        await LocalStorageService.removeDraftChallan(_generatedChallanNumber!);
-      }
+      // Remove from local storage so ended challan disappears from Old Challans (any format: DC009504, SOMIK - DC009504)
+      final serverNumber = fullChallan?.challanNumber ?? challan.challanNumber;
+      _hasEndedChallan = true; // Block any late _saveDraftChallan from re-adding the draft
+
+      try {
+        await LocalStorageService.removeDraftChallanAfterEnd(
+          endedChallanId: fullChallan?.id ?? challan.id,
+          serverChallanNumber: serverNumber,
+          localChallanNumber: _generatedChallanNumber,
+          partyName: widget.partyName,
+        );
+      } catch (_) {}
+      try {
+        await LocalStorageService.removeDraftChallansByDcNumber(serverNumber);
+        if (_generatedChallanNumber != null && _generatedChallanNumber!.trim().isNotEmpty) {
+          await LocalStorageService.removeDraftChallansByDcNumber(_generatedChallanNumber!);
+        }
+      } catch (_) {}
 
       if (!mounted) return;
 
@@ -269,11 +416,13 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
         ),
       );
 
-      Navigator.pushReplacement(
+      // Clear entire challan flow (summary + item info + product selection) so no screen below can run a late save and re-add the draft
+      Navigator.pushAndRemoveUntil(
         context,
         MaterialPageRoute(
           builder: (_) => ViewChallanScreen(challan: fullChallan),
         ),
+        (route) => route.isFirst,
       );
     } catch (e) {
       if (!mounted) return;
@@ -290,47 +439,52 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
     }
   }
 
+  void _goToMain() {
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (context) => const MainScreen()),
+      (route) => false,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF5F5F5),
-      appBar: AppBar(
-        elevation: 0,
-        backgroundColor: Colors.white,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF1A1A1A)),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: const Text(
-          'Challan Summary',
-          style: TextStyle(
-            color: Color(0xFF1A1A1A),
-            fontSize: 20,
-            fontWeight: FontWeight.bold,
-            letterSpacing: 0.5,
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _goToMain();
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF5F5F5),
+        appBar: AppBar(
+          elevation: 0,
+          backgroundColor: Colors.white,
+          automaticallyImplyLeading: false,
+          title: const Text(
+            'Challan Summary',
+            style: TextStyle(
+              color: Color(0xFF1A1A1A),
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 0.5,
+            ),
+          ),
+          centerTitle: false,
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.home_outlined, color: Color(0xFF1A1A1A)),
+              onPressed: _goToMain,
+              tooltip: 'Home',
+            ),
+          ],
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(1),
+            child: Container(
+              height: 1,
+              color: Colors.grey.shade200,
+            ),
           ),
         ),
-        centerTitle: false,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.home_outlined, color: Color(0xFF1A1A1A)),
-            onPressed: () {
-              Navigator.of(context).pushAndRemoveUntil(
-                MaterialPageRoute(builder: (context) => const MainScreen()),
-                (route) => false,
-              );
-            },
-            tooltip: 'Home',
-          ),
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Container(
-            height: 1,
-            color: Colors.grey.shade200,
-          ),
-        ),
-      ),
       body: SafeArea(
         child: Column(
           children: [
@@ -543,6 +697,7 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

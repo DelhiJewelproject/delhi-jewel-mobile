@@ -1,5 +1,7 @@
-from contextlib import closing
-from datetime import datetime
+# DecoJewels API backend (FastAPI)
+import asyncio
+from contextlib import asynccontextmanager, closing
+from datetime import date, datetime
 from decimal import Decimal
 from io import BytesIO
 import json
@@ -7,7 +9,11 @@ import os
 import re
 from typing import Any, Dict, List
 
-from dotenv import load_dotenv  # type: ignore
+# python-dotenv is optional in some deployments (e.g. production PM2 envs)
+try:
+    from dotenv import load_dotenv  # type: ignore
+except ModuleNotFoundError:
+    load_dotenv = None  # type: ignore
 from fastapi import FastAPI, HTTPException, Request  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from fastapi.responses import Response  # type: ignore
@@ -19,10 +25,171 @@ import qrcode  # type: ignore
 
 from config import get_db_connection_params
 
-load_dotenv()
+if load_dotenv:
+    load_dotenv()
+
+# In-memory cache for slow endpoints (avoids timeout on retry)
+_challan_options_cache = None
+_challan_options_cache_time = 0
+CHALLAN_OPTIONS_CACHE_TTL = 300  # 5 min
+
+_challans_list_cache = {}
+_challans_list_cache_time = {}
+
+_party_data_cache = {}
+_party_data_cache_time = {}
+PARTY_DATA_CACHE_TTL = 300  # 5 min - party data rarely changes
 
 
-app = FastAPI(title="Delhi Jewel API")
+def _migrate_varchar_columns(cursor, conn):
+    """Explicitly migrate VARCHAR(50) columns to VARCHAR(255) for party_name, station_name, transport_name, challan_number.
+    This function ALWAYS attempts to alter columns - PostgreSQL will handle gracefully if already correct size.
+    Uses USING clause to handle any data conversion issues.
+    """
+    tables_to_migrate = ['challans', 'orders']
+    columns_to_migrate = ['party_name', 'station_name', 'transport_name']
+    # Also migrate challan_number in challans table (it can be long when party name is included)
+    challan_number_migration = [('challans', 'challan_number')]
+    
+    for table_name in tables_to_migrate:
+        # First check if table exists
+        try:
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = %s
+                )
+            """, (table_name,))
+            table_exists = cursor.fetchone()
+            if not table_exists or (isinstance(table_exists, (tuple, list)) and not table_exists[0]) or (isinstance(table_exists, dict) and not table_exists.get('exists')):
+                continue
+        except Exception:
+            continue
+        
+        for column_name in columns_to_migrate:
+            # ALWAYS try to alter - be very aggressive
+            # Try multiple approaches to ensure it works
+            migrated = False
+            for attempt in range(3):
+                try:
+                    # Method 1: Direct ALTER with USING clause (most reliable)
+                    cursor.execute(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE VARCHAR(255) USING {column_name}::VARCHAR(255)")
+                    if conn:
+                        conn.commit()
+                    print(f"✓ Migrated {table_name}.{column_name} to VARCHAR(255) (attempt {attempt + 1})")
+                    migrated = True
+                    break
+                except Exception as alter_err:
+                    error_msg = str(alter_err).lower()
+                    # If it says "already" or "does not exist", that's fine
+                    if 'already' in error_msg or 'does not exist' in error_msg or 'is not of type' in error_msg:
+                        print(f"Info: {table_name}.{column_name} is already correct or doesn't exist")
+                        migrated = True
+                        break
+                    # If it's the last attempt, log the error
+                    if attempt == 2:
+                        import traceback
+                        print(f"ERROR: Failed to migrate {table_name}.{column_name} after 3 attempts: {alter_err}")
+                        # Check current state for debugging
+                        try:
+                            cursor.execute("""
+                                SELECT data_type, character_maximum_length
+                                FROM information_schema.columns 
+                                WHERE table_name = %s AND column_name = %s
+                            """, (table_name, column_name))
+                            col_info = cursor.fetchone()
+                            if col_info:
+                                current_length = col_info[1] if isinstance(col_info, (tuple, list)) else col_info.get("character_maximum_length")
+                                print(f"  Current state: type={col_info[0] if isinstance(col_info, (tuple, list)) else col_info.get('data_type')}, length={current_length}")
+                        except Exception:
+                            pass
+                        traceback.print_exc()
+                    else:
+                        # Try alternative method
+                        try:
+                            cursor.execute(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE VARCHAR(255)")
+                            if conn:
+                                conn.commit()
+                            print(f"✓ Migrated {table_name}.{column_name} to VARCHAR(255) (alternative method)")
+                            migrated = True
+                            break
+                        except Exception:
+                            pass
+    
+    # Also migrate challan_number separately (it's VARCHAR(50) but can exceed 50 chars with long party names)
+    for table_name, column_name in challan_number_migration:
+        migrated = False
+        for attempt in range(3):
+            try:
+                cursor.execute(f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE VARCHAR(255) USING {column_name}::VARCHAR(255)")
+                if conn:
+                    conn.commit()
+                print(f"✓ Migrated {table_name}.{column_name} to VARCHAR(255) (attempt {attempt + 1})")
+                migrated = True
+                break
+            except Exception as alter_err:
+                error_msg = str(alter_err).lower()
+                if 'already' in error_msg or 'does not exist' in error_msg:
+                    print(f"Info: {table_name}.{column_name} is already correct or doesn't exist")
+                    migrated = True
+                    break
+                if attempt == 2:
+                    import traceback
+                    print(f"ERROR: Failed to migrate {table_name}.{column_name}: {alter_err}")
+                    traceback.print_exc()
+
+def _run_startup_db_checks():
+    """Run DB table checks in a thread so server can start even when DB is slow/unavailable."""
+    try:
+        with closing(get_db_connection()) as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                ensure_product_tables(cursor)
+                ensure_challan_tables(cursor, conn)
+                _migrate_varchar_columns(cursor, conn)  # Explicit migration
+                cleanup_finalized_challan_numbers(cursor)
+            conn.commit()
+    except Exception as exc:
+        print(f"Warning: Startup table checks failed: {exc}")
+
+
+def _warm_challan_cache():
+    """Preload cache in background so first app request is fast."""
+    import time
+    time.sleep(3)
+    try:
+        g = globals()
+        if "get_challan_options" in g:
+            opts = g["get_challan_options"](quick=True)  # Fast warm
+            # Warm party-data for first few parties (helps auto-fill)
+            if opts and "get_party_data_from_orders" in g:
+                for p in (opts.get("party_names") or [])[:3]:
+                    if p and str(p).strip():
+                        try:
+                            g["get_party_data_from_orders"](str(p).strip())
+                        except Exception:
+                            pass
+        if "list_challans" in g:
+            g["list_challans"](limit=10)
+        print("Challan cache warmed successfully")
+    except Exception as e:
+        print(f"Cache warm skipped: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Lifespan event handler for startup and shutdown tasks.
+    """
+    # Run DB checks in thread so server starts listening immediately
+    asyncio.create_task(asyncio.to_thread(_run_startup_db_checks))
+    # Warm cache in background so first request doesn't timeout
+    asyncio.create_task(asyncio.to_thread(_warm_challan_cache))
+    yield
+    # Shutdown (if needed in the future)
+    pass
+
+
+app = FastAPI(title="DecoJewels API", lifespan=lifespan)
 
 # CORS middleware to allow Flutter app to connect
 app.add_middleware(
@@ -202,8 +369,23 @@ def ensure_orders_table(cursor):
                 print(f"Warning: Could not add NOT NULL or UNIQUE constraint to order_number: {e}")
                 # If constraint fails, at least ensure the column exists
 
+    # Indexes for challan options queries (DISTINCT on party, station, transport)
+    for idx_name, col in [
+        ("idx_orders_party_name", "party_name"),
+        ("idx_orders_station", "station"),
+        ("idx_orders_transport_name", "transport_name"),
+    ]:
+        try:
+            cursor.execute(
+                SQL("CREATE INDEX IF NOT EXISTS {} ON orders({})").format(
+                    Identifier(idx_name), Identifier(col)
+                )
+            )
+        except Exception:
+            pass
 
-def ensure_challan_tables(cursor):
+
+def ensure_challan_tables(cursor, conn=None):
     """
     Create challan tables if they do not exist, and ensure all required columns exist.
     """
@@ -223,7 +405,7 @@ def ensure_challan_tables(cursor):
         cursor.execute("""
             CREATE TABLE challans (
                 id SERIAL PRIMARY KEY,
-                challan_number VARCHAR(50) UNIQUE NOT NULL,
+                challan_number VARCHAR(255) UNIQUE NOT NULL,
                 party_name VARCHAR(255) NOT NULL,
                 station_name VARCHAR(255) NOT NULL,
                 transport_name VARCHAR(255),
@@ -244,7 +426,7 @@ def ensure_challan_tables(cursor):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS challans (
                 id SERIAL PRIMARY KEY,
-                challan_number VARCHAR(50) UNIQUE NOT NULL,
+                challan_number VARCHAR(255) UNIQUE NOT NULL,
                 party_name VARCHAR(255) NOT NULL,
                 station_name VARCHAR(255) NOT NULL,
                 transport_name VARCHAR(255),
@@ -286,19 +468,46 @@ def ensure_challan_tables(cursor):
         ON challans(status)
     """)
     cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_challans_party_name 
+        ON challans(party_name)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_challans_station_name 
+        ON challans(station_name)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_challans_transport_name 
+        ON challans(transport_name)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_challans_created_at 
+        ON challans(created_at DESC)
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_challan_items_challan_id 
         ON challan_items(challan_id)
     """)
     
+    # Ensure UNIQUE on challan_number so duplicate numbers are rejected at DB level
+    try:
+        cursor.execute("""
+            ALTER TABLE challans
+            ADD CONSTRAINT challans_challan_number_key UNIQUE (challan_number)
+        """)
+    except Exception:
+        pass  # Constraint already exists
+
     # Ensure columns exist even if table was created previously with old schema
     challan_columns = [
-        ("challan_number", "VARCHAR(50)"),
+        ("challan_number", "VARCHAR(255)"),  # Changed from VARCHAR(50) to accommodate long party names
         ("party_name", "VARCHAR(255)"),
         ("station_name", "VARCHAR(255)"),
         ("transport_name", "VARCHAR(255)"),
         ("price_category", "VARCHAR(100)"),
         ("total_amount", "NUMERIC(12, 2) DEFAULT 0"),
         ("total_quantity", "NUMERIC(12, 2) DEFAULT 0"),
+        ("gst_amount", "NUMERIC(12, 2) DEFAULT 0"),
+        ("apply_gst", "VARCHAR(50)"),
         ("status", "VARCHAR(50) DEFAULT 'draft'"),
         ("notes", "TEXT"),
         ("metadata", "JSONB"),
@@ -309,11 +518,12 @@ def ensure_challan_tables(cursor):
         try:
             # Check if column exists first
             cursor.execute("""
-                SELECT column_name 
+                SELECT column_name, character_maximum_length
                 FROM information_schema.columns 
                 WHERE table_name = 'challans' AND column_name = %s
             """, (column_name,))
-            if not cursor.fetchone():
+            existing_col = cursor.fetchone()
+            if not existing_col:
                 # Column doesn't exist, add it
                 cursor.execute(
                     SQL("ALTER TABLE challans ADD COLUMN {} {}").format(
@@ -321,8 +531,61 @@ def ensure_challan_tables(cursor):
                         SQL(column_type)
                     )
                 )
+            elif column_name == "party_name":
+                # Always check and upgrade party_name column if it's VARCHAR(50) or smaller
+                try:
+                    max_length = existing_col.get("character_maximum_length") if isinstance(existing_col, dict) else (existing_col[1] if len(existing_col) > 1 else None)
+                    if max_length is not None and max_length < 255:
+                        cursor.execute("ALTER TABLE challans ALTER COLUMN party_name TYPE VARCHAR(255)")
+                        if conn:
+                            conn.commit()  # Commit the ALTER immediately
+                        print(f"✓ Updated challans.party_name column from VARCHAR({max_length}) to VARCHAR(255)")
+                    elif max_length is None:
+                        # Column exists but we couldn't determine length - try to upgrade anyway
+                        try:
+                            cursor.execute("ALTER TABLE challans ALTER COLUMN party_name TYPE VARCHAR(255)")
+                            if conn:
+                                conn.commit()
+                            print(f"✓ Updated challans.party_name column to VARCHAR(255)")
+                        except Exception:
+                            pass
+                except Exception as alter_err:
+                    print(f"Warning: Could not alter challans.party_name column size: {alter_err}")
+                    import traceback
+                    traceback.print_exc()
+            elif column_name in ["station_name", "transport_name"]:
+                # Also ensure station_name and transport_name are VARCHAR(255)
+                try:
+                    max_length = existing_col.get("character_maximum_length") if isinstance(existing_col, dict) else (existing_col[1] if len(existing_col) > 1 else None)
+                    if max_length is not None and max_length < 255:
+                        cursor.execute(f"ALTER TABLE challans ALTER COLUMN {column_name} TYPE VARCHAR(255)")
+                        if conn:
+                            conn.commit()
+                        print(f"✓ Updated challans.{column_name} column from VARCHAR({max_length}) to VARCHAR(255)")
+                    elif max_length is None:
+                        # Try to upgrade anyway if we can't determine length
+                        try:
+                            cursor.execute(f"ALTER TABLE challans ALTER COLUMN {column_name} TYPE VARCHAR(255)")
+                            if conn:
+                                conn.commit()
+                            print(f"✓ Updated challans.{column_name} column to VARCHAR(255)")
+                        except Exception:
+                            pass
+                except Exception as alter_err:
+                    print(f"Warning: Could not alter challans.{column_name} column size: {alter_err}")
+                    import traceback
+                    traceback.print_exc()
         except Exception as e:
-            print(f"Warning: Could not add column {column_name} to challans table: {e}")
+            print(f"Warning: Could not add/check column {column_name} to challans table: {e}")
+    
+    # ALWAYS run migration check after ensuring columns exist
+    if conn:
+        try:
+            _migrate_varchar_columns(cursor, conn)
+        except Exception as migrate_err:
+            print(f"Warning: Migration check failed in ensure_challan_tables: {migrate_err}")
+            import traceback
+            traceback.print_exc()
     
     challan_item_columns = [
         ("challan_id", "INTEGER"),
@@ -363,6 +626,8 @@ def generate_challan_number(cursor, party_name: str = None) -> str:
     When challan is finalized, party name is removed leaving just DC000001
     Starts from DC000001 (not DC000000)
     """
+    # Advisory lock so only one transaction generates at a time (prevents duplicate DC numbers)
+    cursor.execute("SELECT pg_advisory_xact_lock(8247)")
     # Get full party name (uppercase)
     if not party_name:
         party_name = "UNKNOWN"  # Default fallback
@@ -374,6 +639,7 @@ def generate_challan_number(cursor, party_name: str = None) -> str:
     try:
         # Use regex to extract DC numbers from all challans and find the maximum
         # This matches both "DC000001" and "PARTY_NAME - DC000001" formats
+        # FOR UPDATE locks the row so concurrent requests get unique sequence numbers
         cursor.execute("""
             SELECT challan_number 
             FROM challans 
@@ -386,6 +652,7 @@ def generate_challan_number(cursor, party_name: str = None) -> str:
                     ) AS INTEGER
                 ) DESC
             LIMIT 1
+            FOR UPDATE
         """)
         result = cursor.fetchone()
         
@@ -441,11 +708,12 @@ def generate_challan_number(cursor, party_name: str = None) -> str:
             max_sequence = 0  # Start from 0 so first challan becomes DC000001
     
     # Generate a unique number by incrementing the global DC sequence
+    # Format: DC000001..DC999999, then DC1000000, DC1000001... (no limit)
     max_attempts = 1000  # Safety limit
     for attempt in range(max_attempts):
         sequence_num = max_sequence + attempt + 1
-        sequence_str = str(sequence_num).zfill(6)  # 6-digit serial number (000001, 000002, etc.)
-        dc_series = f"DC{sequence_str}"  # DC000001, DC000002, etc.
+        sequence_str = str(sequence_num).zfill(6) if sequence_num <= 999999 else str(sequence_num)
+        dc_series = f"DC{sequence_str}"  # DC000001..DC999999, DC1000000+
         challan_number = f"{party_name_upper} - {dc_series}"  # SAGAR - DC000001, etc.
         
         # Check if this number already exists
@@ -469,29 +737,128 @@ def decimal_to_float(value):
         return float(value)
     return value
 
+
+def _json_serializable(value):
+    """Convert a value to something JSON-serializable (avoids 500 on GET challan)."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_serializable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_serializable(v) for v in value]
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+def process_designs_field(designs_data):
+    """
+    Process designs field from database to extract design names/codes as a list of strings.
+    Handles various formats: dict with 'designs' key, JSON string, list of objects, list of strings.
+    """
+    if designs_data is None:
+        return []
+    
+    try:
+        # If it's a dict, check for 'designs' key first (most common case from database)
+        if isinstance(designs_data, dict):
+            if 'designs' in designs_data:
+                designs_list = designs_data['designs']
+                if isinstance(designs_list, list) and len(designs_list) > 0:
+                    # If it's a list of dicts, extract design_name or design_code
+                    if isinstance(designs_list[0], dict):
+                        result = []
+                        for d in designs_list:
+                            if isinstance(d, dict):
+                                design_name = d.get('design_name') or d.get('design_code') or d.get('name')
+                                if design_name:
+                                    result.append(str(design_name))
+                        return result
+                    # If it's a list of strings, return as is
+                    elif isinstance(designs_list[0], str):
+                        return designs_list
+                elif isinstance(designs_list, list):
+                    return []
+            # If dict doesn't have 'designs' key, try to extract values
+            if 'design' in designs_data:
+                design_val = designs_data['design']
+                if isinstance(design_val, list):
+                    return [str(d) for d in design_val]
+                return [str(design_val)]
+        
+        # If it's already a list
+        if isinstance(designs_data, list):
+            if len(designs_data) == 0:
+                return []
+            # Check if it's a list of strings
+            if isinstance(designs_data[0], str):
+                return designs_data
+            # If it's a list of dicts, extract design_name or design_code
+            if isinstance(designs_data[0], dict):
+                result = []
+                for d in designs_data:
+                    if isinstance(d, dict):
+                        design_name = d.get('design_name') or d.get('design_code') or d.get('name')
+                        if design_name:
+                            result.append(str(design_name))
+                return result
+        
+        # If it's a string, try to parse as JSON
+        if isinstance(designs_data, str):
+            try:
+                parsed = json.loads(designs_data)
+                return process_designs_field(parsed)  # Recursively process parsed JSON
+            except (json.JSONDecodeError, TypeError):
+                # If parsing fails, treat as comma-separated string
+                return [d.strip() for d in designs_data.split(',') if d.strip()]
+        
+        # Fallback: convert to string
+        return [str(designs_data)]
+    except Exception as e:
+        print(f"Error processing designs field: {e}, type: {type(designs_data)}, value: {designs_data}")
+        import traceback
+        traceback.print_exc()
+        return []
+
 def serialize_challan(challan_row, items: List[Dict[str, Any]] = None):
     if not challan_row:
         return None
-    
-    challan = dict(challan_row)
+    try:
+        challan = dict(challan_row)
+    except Exception as e:
+        print(f"serialize_challan: dict(challan_row) failed: {e}")
+        challan = {k: getattr(challan_row, k, None) for k in getattr(challan_row, "_fields", []) or []}
     challan["total_amount"] = decimal_to_float(challan.get("total_amount"))
     challan["total_quantity"] = decimal_to_float(challan.get("total_quantity"))
-    
-    if challan.get("created_at") and isinstance(challan.get("created_at"), datetime):
-        challan["created_at"] = challan["created_at"].isoformat()
-    if challan.get("updated_at") and isinstance(challan.get("updated_at"), datetime):
-        challan["updated_at"] = challan["updated_at"].isoformat()
-    
+    if challan.get("created_at") is not None:
+        challan["created_at"] = _json_serializable(challan["created_at"])
+    if challan.get("updated_at") is not None:
+        challan["updated_at"] = _json_serializable(challan["updated_at"])
+    if challan.get("metadata") is not None:
+        v = challan["metadata"]
+        if isinstance(v, str):
+            try:
+                challan["metadata"] = json.loads(v)
+            except (TypeError, json.JSONDecodeError):
+                challan["metadata"] = None
+        else:
+            challan["metadata"] = _json_serializable(v)
     serialized_items = []
     if items:
         for item in items:
-            item_dict = dict(item)
+            try:
+                item_dict = dict(item)
+            except Exception:
+                item_dict = {k: getattr(item, k, None) for k in getattr(item, "_fields", []) or []}
             item_dict["quantity"] = decimal_to_float(item_dict.get("quantity"))
             item_dict["unit_price"] = decimal_to_float(item_dict.get("unit_price"))
             item_dict["total_price"] = decimal_to_float(item_dict.get("total_price"))
-            serialized_items.append(item_dict)
+            serialized_items.append(_json_serializable(item_dict))
     challan["items"] = serialized_items
-    return challan
+    return _json_serializable(challan)
 
 def fetch_distinct_values(cursor, table: str, column: str, limit: int = 100) -> List[str]:
     """
@@ -547,7 +914,7 @@ def cleanup_finalized_challan_numbers(cursor):
             SELECT id, challan_number, status
             FROM challans
             WHERE status = ANY(%s)
-            AND challan_number LIKE '% - DC%'
+            AND challan_number LIKE '%% - DC%%'
         """, (finalized_states,))
         
         challans_to_fix = cursor.fetchall()
@@ -594,26 +961,9 @@ def cleanup_finalized_challan_numbers(cursor):
     except Exception as e:
         print(f"Warning: Could not cleanup finalized challan numbers: {e}")
 
-@app.on_event("startup")
-def startup_tasks():
-    """
-    Run one-time startup checks (ensuring core tables exist).
-    """
-    try:
-        with closing(get_db_connection()) as conn:
-            with conn.cursor(row_factory=dict_row) as cursor:
-                ensure_product_tables(cursor)
-                ensure_challan_tables(cursor)
-                # Clean up existing finalized challans that still have party names
-                cleanup_finalized_challan_numbers(cursor)
-            conn.commit()
-    except Exception as exc:
-        print(f"Warning: Startup table checks failed: {exc}")
-
-
 @app.get("/")
 def read_root():
-    return {"message": "Delhi Jewel API is running"}
+    return {"message": "DecoJewels API is running"}
 
 @app.get("/api/verify/whatsapp/{phone_number}")
 def verify_whatsapp(phone_number: str):
@@ -777,6 +1127,7 @@ def get_product_by_id(product_id: int):
                 pm.is_active,
                 pm.created_on as created_at,
                 pm.updated_at,
+                pm.designs,
                 pc.qr_code
             FROM products_master pm
             LEFT JOIN product_catalog pc ON pm.external_id = pc.external_id
@@ -799,7 +1150,8 @@ def get_product_by_id(product_id: int):
             'qr_code': product['qr_code'],
             'is_active': product['is_active'],
             'created_at': product['created_at'],
-            'updated_at': product['updated_at']
+            'updated_at': product['updated_at'],
+            'designs': product.get('designs')
         }
         
         # Get sizes for this product - check both direct (product_type='master') and via product_catalog
@@ -1153,29 +1505,159 @@ def create_order_with_multiple_items(order_data: dict):
                 conn.rollback()
                 raise HTTPException(status_code=500, detail=f"Failed to create order: {str(e)}")
         
-        for item in items:
+        skipped_items = []
+        print(f"DEBUG: Processing {len(items)} items for order")
+        for idx, item in enumerate(items):
+            print(f"DEBUG: Item {idx}: {item}")
             product_id = item.get("product_id")
+            print(f"DEBUG: Item {idx} product_id: {product_id} (type: {type(product_id)})")
             if not product_id:
+                product_name = item.get("product_name", "Unknown")
+                skipped_items.append(f"{product_name}: Missing product_id")
                 print(f"Warning: Item missing product_id: {item}")
                 continue
             
             # Get product details
+            #
+            # IMPORTANT:
+            # - Mobile app sends `product_id` from `products_master.id`
+            # - Orders table historically stored `product_id` that matches `products_master.id`
+            # - `product_catalog.id` is a different sequence, but shares `external_id` with `products_master.external_id`
+            #
+            # So: first try `product_catalog.id = product_id` (legacy / admin inputs),
+            # then resolve via products_master.id -> external_id -> product_catalog (best-effort),
+            # and finally fall back to products_master data even if no catalog row exists.
             cursor.execute("""
                 SELECT id, external_id, name 
                 FROM product_catalog 
                 WHERE id = %s AND is_active = true
             """, (product_id,))
             product_info = cursor.fetchone()
-            
+
+            # Fallback 0: resolve products_master.id -> product_catalog by external_id
             if not product_info:
-                print(f"Warning: Product {product_id} not found, skipping")
+                try:
+                    cursor.execute("""
+                        SELECT pc.id, pc.external_id, pc.name
+                        FROM products_master pm
+                        JOIN product_catalog pc ON pm.external_id = pc.external_id
+                        WHERE pm.id = %s
+                          AND pc.is_active = true
+                        LIMIT 1
+                    """, (product_id,))
+                    product_info = cursor.fetchone()
+                    if product_info:
+                        # Keep FK consistent with catalog when available
+                        resolved_catalog_id = product_info["id"] if isinstance(product_info, dict) else None
+                        print(f"Info: Resolved catalog product via products_master.id={product_id} -> catalog_id={resolved_catalog_id}")
+                        product_id = resolved_catalog_id or product_id
+                except Exception as e:
+                    print(f"Warning: Could not resolve via products_master->product_catalog for product_id={product_id}: {e}")
+
+            # Fallback 1: resolve by external_id if provided (frontend should send Product.externalId here)
+            if not product_info:
+                product_external_id = item.get("product_external_id")
+                if product_external_id is not None and str(product_external_id).strip() != "":
+                    try:
+                        cursor.execute("""
+                            SELECT id, external_id, name
+                            FROM product_catalog
+                            WHERE external_id = %s AND is_active = true
+                            LIMIT 1
+                        """, (product_external_id,))
+                        product_info = cursor.fetchone()
+                        if product_info:
+                            # Update product_id to the actual catalog ID (keeps FK consistent)
+                            product_id = product_info["id"] if isinstance(product_info, dict) else product_id
+                            print(f"Info: Resolved product_id via external_id={product_external_id} -> id={product_id}")
+                    except Exception as e:
+                        print(f"Warning: Could not resolve product by external_id={product_external_id}: {e}")
+
+            # Fallback 2: resolve by product_name (last resort) - use case-insensitive matching
+            if not product_info:
+                product_name_for_lookup = (item.get("product_name") or "").strip()
+                if product_name_for_lookup:
+                    try:
+                        # Try exact match first
+                        cursor.execute("""
+                            SELECT id, external_id, name
+                            FROM product_catalog
+                            WHERE name = %s AND is_active = true
+                            LIMIT 1
+                        """, (product_name_for_lookup,))
+                        product_info = cursor.fetchone()
+                        
+                        # If exact match fails, try case-insensitive match
+                        if not product_info:
+                            cursor.execute("""
+                                SELECT id, external_id, name
+                                FROM product_catalog
+                                WHERE LOWER(TRIM(name)) = LOWER(TRIM(%s)) AND is_active = true
+                                LIMIT 1
+                            """, (product_name_for_lookup,))
+                            product_info = cursor.fetchone()
+                        
+                        # If still no match, try partial match (contains)
+                        if not product_info:
+                            cursor.execute("""
+                                SELECT id, external_id, name
+                                FROM product_catalog
+                                WHERE LOWER(name) LIKE LOWER(%s) AND is_active = true
+                                LIMIT 1
+                            """, (f"%{product_name_for_lookup}%",))
+                            product_info = cursor.fetchone()
+                        
+                        if product_info:
+                            product_id = product_info["id"] if isinstance(product_info, dict) else product_id
+                            print(f"Info: Resolved product_id via name='{product_name_for_lookup}' -> id={product_id}")
+                    except Exception as e:
+                        print(f"Warning: Could not resolve product by name='{product_name_for_lookup}': {e}")
+
+            # Final fallback: accept products_master row even if no active catalog row exists.
+            # This prevents order creation from being blocked when product_catalog is incomplete/out-of-sync.
+            products_master_row = None
+            if not product_info:
+                try:
+                    cursor.execute("""
+                        SELECT id, external_id, name
+                        FROM products_master
+                        WHERE id = %s
+                        LIMIT 1
+                    """, (item.get("product_id"),))
+                    products_master_row = cursor.fetchone()
+                    if products_master_row:
+                        print(f"Info: Using products_master for product_id={item.get('product_id')} (no active catalog match)")
+                except Exception as e:
+                    print(f"Warning: Could not lookup products_master for product_id={item.get('product_id')}: {e}")
+
+            if not product_info and not products_master_row:
+                product_name = item.get("product_name", f"Product ID {product_id}")
+                skipped_items.append(f"{product_name}: Product not found in products master/catalog")
+                print(f"Warning: Product {product_id} not found in products_master or product_catalog, skipping")
                 continue
             
             # Convert product_info to dict for easier access (it's already a dict_row from row_factory)
             product_dict = dict(product_info) if product_info else {}
+            if not product_dict and products_master_row:
+                # Normalize products_master row to same shape used below
+                product_dict = dict(products_master_row)
             
             unit_price = float(item.get("unit_price", 0) or 0)
-            quantity = int(item.get("quantity", 1))
+            quantity = int(float(item.get("quantity", 0) or 0))  # Convert to float first, then int to handle decimal strings
+            
+            # Validate quantity and unit_price
+            if quantity <= 0:
+                product_name = item.get("product_name", f"Product ID {product_id}")
+                skipped_items.append(f"{product_name}: Quantity must be greater than 0 (got {quantity})")
+                print(f"Warning: Item {idx} has invalid quantity: {quantity}")
+                continue
+            
+            if unit_price <= 0:
+                product_name = item.get("product_name", f"Product ID {product_id}")
+                skipped_items.append(f"{product_name}: Unit price must be greater than 0 (got {unit_price})")
+                print(f"Warning: Item {idx} has invalid unit_price: {unit_price}")
+                continue
+            
             item_total = unit_price * quantity
             
             # Extract values with fallbacks - ensure we have values
@@ -1252,9 +1734,20 @@ def create_order_with_multiple_items(order_data: dict):
         if len(order_ids) == 0 and len(items) > 0:
             if conn:
                 conn.rollback()
+            print(f"ERROR: No valid items added. Total items: {len(items)}, Skipped: {len(skipped_items)}, Order IDs: {len(order_ids)}")
+            print(f"DEBUG: Skipped items details: {skipped_items}")
+            print(f"DEBUG: First few items received: {items[:3] if len(items) > 0 else 'No items'}")
+            error_detail = "No valid items were added to the order"
+            if skipped_items:
+                error_detail += f". Skipped items: {', '.join(skipped_items[:5])}"  # Show first 5 skipped items
+                if len(skipped_items) > 5:
+                    error_detail += f" (and {len(skipped_items) - 5} more)"
+            else:
+                error_detail += ". All items were rejected (check product_id, quantity, and unit_price)"
+            print(f"DEBUG: Error detail to return: {error_detail}")
             raise HTTPException(
                 status_code=400,
-                detail="No valid items were added to the order"
+                detail=error_detail
             )
         
         conn.commit()
@@ -1361,6 +1854,7 @@ def get_product_by_barcode(barcode: str):
                 pm.is_active,
                 pm.created_on as created_at,
                 pm.updated_at,
+                pm.designs,
                 pc.qr_code
             FROM products_master pm
             LEFT JOIN product_catalog pc ON pm.external_id = pc.external_id
@@ -1386,7 +1880,8 @@ def get_product_by_barcode(barcode: str):
             'qr_code': product['qr_code'],
             'is_active': product['is_active'],
             'created_at': product['created_at'],
-            'updated_at': product['updated_at']
+            'updated_at': product['updated_at'],
+            'designs': product.get('designs')
         }
         
         # Get sizes for this product - check both direct (product_type='master') and via product_catalog
@@ -1808,14 +2303,37 @@ def create_order(order_data: dict):
         # Check if party_name, station, price_category, transport_name, and created_by columns exist, if not add them
         try:
             cursor.execute("""
-                SELECT column_name 
+                SELECT column_name, character_maximum_length
                 FROM information_schema.columns 
                 WHERE table_name = 'orders' AND column_name IN ('party_name', 'station', 'price_category', 'transport_name', 'created_by')
             """)
-            existing_columns = [row[0] for row in cursor.fetchall()]
+            existing_cols = cursor.fetchall()
+            existing_columns = [row[0] if isinstance(row, (tuple, list)) else row.get("column_name") for row in existing_cols]
             
             if 'party_name' not in existing_columns:
                 cursor.execute("ALTER TABLE orders ADD COLUMN party_name VARCHAR(255)")
+            else:
+                # Always check and upgrade party_name if it's VARCHAR(50) or smaller
+                party_col = next((row for row in existing_cols if (row[0] if isinstance(row, (tuple, list)) else row.get("column_name")) == 'party_name'), None)
+                if party_col:
+                    try:
+                        max_length = party_col[1] if isinstance(party_col, (tuple, list)) else party_col.get("character_maximum_length")
+                        if max_length is not None and max_length < 255:
+                            cursor.execute("ALTER TABLE orders ALTER COLUMN party_name TYPE VARCHAR(255)")
+                            conn.commit()  # Commit the ALTER immediately
+                            print(f"✓ Updated orders.party_name column from VARCHAR({max_length}) to VARCHAR(255)")
+                        elif max_length is None:
+                            # Try to upgrade anyway if we can't determine length
+                            try:
+                                cursor.execute("ALTER TABLE orders ALTER COLUMN party_name TYPE VARCHAR(255)")
+                                conn.commit()
+                                print(f"✓ Updated orders.party_name column to VARCHAR(255)")
+                            except Exception:
+                                pass
+                    except Exception as alter_err:
+                        print(f"Warning: Could not alter orders.party_name column size: {alter_err}")
+                        import traceback
+                        traceback.print_exc()
             if 'station' not in existing_columns:
                 cursor.execute("ALTER TABLE orders ADD COLUMN station VARCHAR(255)")
             if 'price_category' not in existing_columns:
@@ -1919,377 +2437,480 @@ def create_order(order_data: dict):
             cursor.close()
             conn.close()
 
-@app.get("/api/orders/party-data/{party_name}")
-def get_party_data_from_orders(party_name: str):
-    """
-    Get the most recent station, phone number, and price category for a given party name from orders table.
-    Falls back to challans for price category if not found in orders.
-    """
-    conn = None
-    cursor = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(row_factory=dict_row)
-        
-        # Check if orders table exists
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'orders'
-            )
-        """)
-        exists_row = cursor.fetchone()
-        orders_table_exists = bool(exists_row.get("exists") if isinstance(exists_row, dict) else exists_row[0] if exists_row else False)
-        
-        if not orders_table_exists:
-            raise HTTPException(
-                status_code=404,
-                detail="Orders table not found"
-            )
-        
-        # Query for the most recent order with matching party name
-        # Check if price_category column exists in orders table
-        cursor.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'orders' AND column_name = 'price_category'
-        """)
-        has_price_category = cursor.fetchone() is not None
-        
-        # Check if transport_name column exists
-        cursor.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'orders' AND column_name = 'transport_name'
-        """)
-        has_transport_name = cursor.fetchone() is not None
-        
-        if has_price_category and has_transport_name:
-            cursor.execute("""
-                SELECT station, customer_phone, price_category, transport_name
-                FROM orders
-                WHERE party_name = %s
-                ORDER BY created_at DESC
-                LIMIT 1
-            """, (party_name,))
-        elif has_price_category:
-            cursor.execute("""
-                SELECT station, customer_phone, price_category
-                FROM orders
-                WHERE party_name = %s
-                ORDER BY created_at DESC
-                LIMIT 1
-            """, (party_name,))
-        elif has_transport_name:
-            cursor.execute("""
-                SELECT station, customer_phone, transport_name
-                FROM orders
-                WHERE party_name = %s
-                ORDER BY created_at DESC
-                LIMIT 1
-            """, (party_name,))
-        else:
-            cursor.execute("""
-                SELECT station, customer_phone
-                FROM orders
-                WHERE party_name = %s
-                ORDER BY created_at DESC
-                LIMIT 1
-            """, (party_name,))
-        
-        result = cursor.fetchone()
-        
-        if not result:
-            raise HTTPException(
-                status_code=404,
-                detail="No order found for this party"
-            )
-        
-        response_data = {
-            "station": result.get("station"),
-            "phone_number": result.get("customer_phone"),
-            "price_category": result.get("price_category") if has_price_category else None,
-            "transport_name": result.get("transport_name") if has_transport_name else None
-        }
-        
-        # If price_category is not in orders or is null, try to get it from challans
-        if not response_data["price_category"]:
-            try:
-                ensure_challan_tables(cursor)
-                cursor.execute("""
-                    SELECT price_category
-                    FROM challans
-                    WHERE party_name = %s 
-                        AND price_category IS NOT NULL 
-                        AND price_category != ''
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                """, (party_name,))
-                challan_result = cursor.fetchone()
-                if challan_result and challan_result.get("price_category"):
-                    response_data["price_category"] = challan_result.get("price_category")
-            except Exception as challan_error:
-                print(f"Error fetching price category from challans: {challan_error}")
-        
-        # If transport_name is not in orders or is null, try to get it from challans
-        if not response_data["transport_name"]:
-            try:
-                ensure_challan_tables(cursor)
-                cursor.execute("""
-                    SELECT transport_name
-                    FROM challans
-                    WHERE party_name = %s 
-                        AND transport_name IS NOT NULL 
-                        AND transport_name != ''
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                """, (party_name,))
-                challan_result = cursor.fetchone()
-                if challan_result and challan_result.get("transport_name"):
-                    response_data["transport_name"] = challan_result.get("transport_name")
-            except Exception as challan_error:
-                print(f"Error fetching transport_name from challans: {challan_error}")
-        
-        return response_data
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error fetching party data: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error fetching party data: {str(e)}"
-        )
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+@app.get("/api/orders/party-data")
+def get_party_data_from_orders_query(party_name: str = None):
+    """Query parameter version: /api/orders/party-data?party_name=..."""
+    return get_party_data_from_orders_impl(party_name)
 
-@app.get("/api/challan/options")
-def get_challan_options():
+@app.get("/api/orders/party-data/{party_name_path:path}")
+def get_party_data_from_orders_path(party_name_path: str):
+    """Path parameter version: /api/orders/party-data/{name} - uses :path to handle / in names"""
+    return get_party_data_from_orders_impl(party_name_path)
+
+def get_party_data_from_orders_impl(party_name_value: str = None):
     """
-    Return distinct party, station, transport and price categories saved in the database.
+    Get the most recent station, phone number, price category, transport for a party.
+    Uses exact matching only. Always returns 200 OK with data (or null values if not found).
+    Never returns 404 to prevent frontend errors.
     """
+    global _party_data_cache, _party_data_cache_time
+    
+    # Handle invalid/empty party names gracefully
+    party_trimmed = party_name_value.strip() if party_name_value else ""
+    if not party_trimmed or len(party_trimmed) < 2 or party_trimmed == "/":
+        # Return empty response for invalid party names (like "/" or empty)
+        return {"station": None, "phone_number": None, "price_category": None, "transport_name": None}
+    
+    key = party_trimmed.lower()
+    now = datetime.now().timestamp()
+    # Don't use cache if it's a 404 response - always try fresh lookup
+    cached_response = _party_data_cache.get(key)
+    if cached_response and (now - _party_data_cache_time.get(key, 0)) < PARTY_DATA_CACHE_TTL:
+        # Only return cached response if it's not None (None might indicate previous 404)
+        if cached_response is not None:
+            print(f"Returning cached party data for: {party_trimmed}")
+            return cached_response
+
     conn = None
     cursor = None
+    response_data = {"station": None, "phone_number": None, "price_category": None, "transport_name": None}
     try:
         conn = get_db_connection()
         cursor = conn.cursor(row_factory=dict_row)
-        ensure_challan_tables(cursor)
-        conn.commit()  # Commit table creation before querying
-        
-        # Get values from orders table first (primary source, no limit to get all)
-        order_party_names = []
-        order_station_names = []
+
+        print(f"Fetching party data for: '{party_trimmed}' (EXACT MATCH ONLY)")
+        response_data = {"station": None, "phone_number": None, "price_category": None, "transport_name": None}
+
+        # 1. Try parties table first (master data - most reliable) - EXACT MATCH ONLY
         try:
-            order_party_names = fetch_distinct_values(cursor, "orders", "party_name", limit=10000)
-        except Exception as e:
-            print(f"Warning: Could not fetch party names from orders table: {e}")
-        
-        try:
-            order_station_names = fetch_distinct_values(cursor, "orders", "station", limit=10000)
-        except Exception as e:
-            print(f"Warning: Could not fetch station names from orders table: {e}")
-        
-        # Get values from challans table (secondary source, to supplement orders data)
-        challan_party_names = []
-        challan_station_names = []
-        try:
-            challan_party_names = fetch_distinct_values(cursor, "challans", "party_name", limit=10000)
-        except Exception as e:
-            print(f"Warning: Could not fetch party names from challans table: {e}")
-        
-        try:
-            challan_station_names = fetch_distinct_values(cursor, "challans", "station_name", limit=10000)
-        except Exception as e:
-            print(f"Warning: Could not fetch station names from challans table: {e}")
-        
-        # Get transport names from orders table (primary source)
-        order_transport_names = []
-        try:
-            order_transport_names = fetch_distinct_values(cursor, "orders", "transport_name", limit=10000)
-        except Exception as e:
-            print(f"Warning: Could not fetch transport names from orders table: {e}")
-        
-        # Get transport names from challans table (secondary source)
-        challan_transport_names = []
-        try:
-            challan_transport_names = fetch_distinct_values(cursor, "challans", "transport_name", limit=10000)
-        except Exception as e:
-            print(f"Warning: Could not fetch transport names from challans table: {e}")
-        
-        # Merge and deduplicate transport names (prioritize orders table, then add from challans)
-        seen_transport = set()
-        transport_names = []
-        
-        # First add all from orders table
-        for name in order_transport_names:
-            if name:
-                normalized = name.strip().lower()
-                if normalized and normalized not in seen_transport:
-                    seen_transport.add(normalized)
-                    transport_names.append(name.strip() if name.strip() else name)
-        
-        # Then add from challans table (only if not already present)
-        for name in challan_transport_names:
-            if name:
-                normalized = name.strip().lower()
-                if normalized and normalized not in seen_transport:
-                    seen_transport.add(normalized)
-                    transport_names.append(name.strip() if name.strip() else name)
-        
-        # Get price categories from challans table
-        price_categories = fetch_distinct_values(cursor, "challans", "price_category", limit=10000)
-        
-        # Merge and deduplicate party names (prioritize orders table, then add from challans)
-        # Start with orders data first, then add challans data (orders takes precedence)
-        seen_party = set()
-        party_names = []
-        
-        # First add all from orders table
-        for name in order_party_names:
-            if name:
-                normalized = name.strip().lower()
-                if normalized and normalized not in seen_party:
-                    seen_party.add(normalized)
-                    party_names.append(name.strip() if name.strip() else name)
-        
-        # Then add from challans table (only if not already present)
-        for name in challan_party_names:
-            if name:
-                normalized = name.strip().lower()
-                if normalized and normalized not in seen_party:
-                    seen_party.add(normalized)
-                    party_names.append(name.strip() if name.strip() else name)
-        
-        # Merge and deduplicate station names (prioritize orders table, then add from challans)
-        seen_station = set()
-        station_names = []
-        
-        # First add all from orders table
-        for name in order_station_names:
-            if name:
-                normalized = name.strip().lower()
-                if normalized and normalized not in seen_station:
-                    seen_station.add(normalized)
-                    station_names.append(name.strip() if name.strip() else name)
-        
-        # Then add from challans table (only if not already present)
-        for name in challan_station_names:
-            if name:
-                normalized = name.strip().lower()
-                if normalized and normalized not in seen_station:
-                    seen_station.add(normalized)
-                    station_names.append(name.strip() if name.strip() else name)
-        
-        # Sort for better UX
-        party_names.sort()
-        station_names.sort()
-        transport_names.sort()
-        
-        # Get customer names and phone numbers from orders table
-        customer_names = []
-        customer_phones = []
-        try:
-            # Check if orders table exists first
             cursor.execute("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'orders'
-                )
+                  SELECT FROM information_schema.tables
+                  WHERE table_name = 'parties'
+                ) AS exists
             """)
-            exists_row = cursor.fetchone()
-            if isinstance(exists_row, dict):
-                orders_table_exists = bool(exists_row.get("exists"))
-            elif exists_row:
-                orders_table_exists = bool(exists_row[0])
-            else:
-                orders_table_exists = False
+            ex = cursor.fetchone()
+            table_exists = ex and (ex.get("exists") if isinstance(ex, dict) else ex[0])
             
-            if orders_table_exists:
-                try:
-                    customer_names = fetch_distinct_values(cursor, "orders", "customer_name", limit=10000)
-                    # Filter out None and empty values
-                    customer_names = [name for name in customer_names if name and name.strip()]
-                    print(f"Successfully fetched {len(customer_names)} customer names from orders table")
-                except Exception as e:
-                    print(f"Error fetching customer names from orders table: {e}")
-                    import traceback
-                    print(traceback.format_exc())
+            if table_exists:
+                # Check which columns exist in parties table
+                cursor.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'parties'
+                    AND column_name IN ('shop_name', 'price_category', 'station', 'transport', 'transport_name')
+                """)
+                parties_cols = cursor.fetchall()
+                parties_col_names = [row.get("column_name") if isinstance(row, dict) else row[0] for row in parties_cols]
                 
-                try:
-                    customer_phones = fetch_distinct_values(cursor, "orders", "customer_phone", limit=10000)
-                    # Filter out None and empty values
-                    customer_phones = [phone for phone in customer_phones if phone and phone.strip()]
-                    print(f"Successfully fetched {len(customer_phones)} customer phones from orders table")
-                except Exception as e:
-                    print(f"Error fetching customer phones from orders table: {e}")
-                    import traceback
-                    print(traceback.format_exc())
-            else:
-                print("Orders table does not exist, skipping customer data fetch")
-        except Exception as e:
-            print(f"Warning: Could not check/fetch customer data from orders table: {e}")
+                # Build SELECT clause based on available columns
+                select_fields = []
+                if 'shop_name' in parties_col_names:
+                    select_fields.append('shop_name')
+                if 'price_category' in parties_col_names:
+                    select_fields.append('price_category')
+                if 'station' in parties_col_names:
+                    select_fields.append('station')
+                # Try both transport and transport_name
+                if 'transport' in parties_col_names:
+                    select_fields.append('transport')
+                elif 'transport_name' in parties_col_names:
+                    select_fields.append('transport_name')
+                
+                if select_fields and 'shop_name' in parties_col_names:
+                    select_clause = ', '.join(select_fields)
+                    
+                    # EXACT MATCH ONLY - no normalization or flexible matching
+                    # Build query safely - validate select_clause doesn't contain SQL injection
+                    if select_clause and all(col in ['shop_name', 'price_category', 'station', 'transport', 'transport_name'] for col in select_clause.split(', ')):
+                        cursor.execute(f"""
+                            SELECT {select_clause}
+                            FROM parties
+                            WHERE LOWER(TRIM(shop_name)) = LOWER(TRIM(%s))
+                            ORDER BY id DESC
+                            LIMIT 1
+                        """, (party_trimmed,))
+                    else:
+                        # Fallback to safe default columns
+                        cursor.execute("""
+                            SELECT shop_name, price_category, station
+                            FROM parties
+                            WHERE LOWER(TRIM(shop_name)) = LOWER(TRIM(%s))
+                            ORDER BY id DESC
+                            LIMIT 1
+                        """, (party_trimmed,))
+                    pr = cursor.fetchone()
+                    
+                    if pr:
+                        matched_shop_name = pr.get("shop_name")
+                        station_from_parties = pr.get("station")
+                        # Try both transport and transport_name - ONLY use actual transport fields
+                        transport_from_parties = pr.get("transport") or pr.get("transport_name")
+                        price_cat_from_parties = pr.get("price_category")
+                        
+                        # CRITICAL: Never use station as transport_name - ensure transport is not the same as station
+                        if transport_from_parties and station_from_parties:
+                            try:
+                                transport_str = str(transport_from_parties).strip().lower() if transport_from_parties else ""
+                                station_str = str(station_from_parties).strip().lower() if station_from_parties else ""
+                                if transport_str and station_str and transport_str == station_str:
+                                    print(f"  WARNING: transport='{transport_from_parties}' matches station='{station_from_parties}' - setting transport_name to None")
+                                    transport_from_parties = None
+                            except Exception as check_err:
+                                print(f"  Warning: Error comparing transport and station: {check_err}")
+                                # If comparison fails, set transport to None to be safe
+                                transport_from_parties = None
+                        
+                        print(f"✓ Found in parties table (EXACT MATCH): shop_name='{matched_shop_name}'")
+                        print(f"  Data: station='{station_from_parties}', transport='{transport_from_parties}', price_category='{price_cat_from_parties}'")
+                        
+                        # Parties table is master data - use it first
+                        if station_from_parties:
+                            response_data["station"] = station_from_parties
+                        if price_cat_from_parties:
+                            response_data["price_category"] = price_cat_from_parties
+                        # Only set transport_name if it's a valid transport value (not null, not empty, and not the same as station)
+                        try:
+                            if transport_from_parties and str(transport_from_parties).strip():
+                                response_data["transport_name"] = str(transport_from_parties).strip()
+                            else:
+                                # Explicitly set to None if transport is null/empty
+                                response_data["transport_name"] = None
+                        except Exception as transport_err:
+                            print(f"  Warning: Error setting transport_name from parties: {transport_err}")
+                            response_data["transport_name"] = None
+        except Exception as parties_err:
+            print(f"Warning: Error fetching from parties table: {parties_err}")
             import traceback
-            print(traceback.format_exc())
+            traceback.print_exc()
+
+        # 2. Try challans table (recent transaction data) - EXACT MATCH ONLY
+        try:
+            # EXACT MATCH ONLY - no normalization or flexible matching
+            cursor.execute("""
+                SELECT station_name, transport_name, price_category, party_name
+                FROM challans
+                WHERE LOWER(TRIM(party_name)) = LOWER(TRIM(%s))
+                ORDER BY created_at DESC LIMIT 1
+            """, (party_trimmed,))
+            cr = cursor.fetchone()
+            
+            if cr:
+                matched_party_name = cr.get("party_name")
+                station_from_challans = cr.get("station_name")
+                transport_from_challans = cr.get("transport_name")
+                price_cat_from_challans = cr.get("price_category")
+                
+                # CRITICAL: Never use station_name as transport_name - ensure transport_name is not the same as station_name
+                if transport_from_challans and station_from_challans:
+                    try:
+                        transport_str = str(transport_from_challans).strip().lower() if transport_from_challans else ""
+                        station_str = str(station_from_challans).strip().lower() if station_from_challans else ""
+                        if transport_str and station_str and transport_str == station_str:
+                            print(f"  WARNING: transport_name='{transport_from_challans}' matches station_name='{station_from_challans}' - setting transport_name to None")
+                            transport_from_challans = None
+                    except Exception as check_err:
+                        print(f"  Warning: Error comparing transport_name and station_name: {check_err}")
+                        # If comparison fails, set transport to None to be safe
+                        transport_from_challans = None
+                
+                print(f"✓ Found in challans table (EXACT MATCH): party_name='{matched_party_name}'")
+                print(f"  Data: station_name='{station_from_challans}', transport_name='{transport_from_challans}', price_category='{price_cat_from_challans}'")
+                
+                # Fill missing fields only (parties table takes priority)
+                if not response_data["station"]:
+                    response_data["station"] = station_from_challans if station_from_challans else None
+                if not response_data["price_category"]:
+                    response_data["price_category"] = price_cat_from_challans if price_cat_from_challans else None
+                # Only set transport_name if it's not already set, is valid, and is not the same as station_name
+                if not response_data["transport_name"]:
+                    try:
+                        if transport_from_challans and str(transport_from_challans).strip():
+                            response_data["transport_name"] = str(transport_from_challans).strip()
+                        else:
+                            # Explicitly set to None if transport is null/empty
+                            response_data["transport_name"] = None
+                    except Exception as transport_err:
+                        print(f"  Warning: Error setting transport_name from challans: {transport_err}")
+                        response_data["transport_name"] = None
+        except Exception as challan_err:
+            print(f"Warning: Error fetching from challans for party '{party_trimmed}': {challan_err}")
+            import traceback
+            traceback.print_exc()
+
+        # 3. Try orders table (for phone_number and any still-missing fields) - EXACT MATCH ONLY
+        try:
+            cursor.execute("""
+                SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'orders') AS exists
+            """)
+            ex = cursor.fetchone()
+            if ex and (ex.get("exists") if isinstance(ex, dict) else ex[0]):
+                # EXACT MATCH ONLY - no normalization or flexible matching
+                cursor.execute("""
+                    SELECT station, customer_phone, price_category, transport_name, party_name
+                    FROM orders
+                    WHERE LOWER(TRIM(party_name)) = LOWER(TRIM(%s))
+                    ORDER BY created_at DESC LIMIT 1
+                """, (party_trimmed,))
+                ord_row = cursor.fetchone()
+                
+                if ord_row:
+                    matched_party_name = ord_row.get("party_name")
+                    station_from_orders = ord_row.get("station")
+                    transport_from_orders = ord_row.get("transport_name")
+                    price_cat_from_orders = ord_row.get("price_category")
+                    
+                    # CRITICAL: Never use station as transport_name - ensure transport_name is not the same as station
+                    if transport_from_orders and station_from_orders:
+                        try:
+                            transport_str = str(transport_from_orders).strip().lower() if transport_from_orders else ""
+                            station_str = str(station_from_orders).strip().lower() if station_from_orders else ""
+                            if transport_str and station_str and transport_str == station_str:
+                                print(f"  WARNING: transport_name='{transport_from_orders}' matches station='{station_from_orders}' - setting transport_name to None")
+                                transport_from_orders = None
+                        except Exception as check_err:
+                            print(f"  Warning: Error comparing transport_name and station: {check_err}")
+                            # If comparison fails, set transport to None to be safe
+                            transport_from_orders = None
+                    
+                    print(f"✓ Found in orders table (EXACT MATCH): party_name='{matched_party_name}'")
+                    print(f"  Data from orders: station='{station_from_orders}', transport='{transport_from_orders}', price_category='{price_cat_from_orders}'")
+                    
+                    # Fill missing fields only (parties and challans take priority)
+                    if not response_data["station"]:
+                        response_data["station"] = station_from_orders
+                    if ord_row.get("customer_phone"):
+                        response_data["phone_number"] = ord_row["customer_phone"]
+                    if not response_data["price_category"]:
+                        response_data["price_category"] = price_cat_from_orders
+                    # Only set transport_name if it's not already set, is valid, and is not the same as station
+                    if not response_data["transport_name"]:
+                        try:
+                            if transport_from_orders and str(transport_from_orders).strip():
+                                response_data["transport_name"] = str(transport_from_orders).strip()
+                            else:
+                                # Explicitly set to None if transport is null/empty
+                                response_data["transport_name"] = None
+                        except Exception as transport_err:
+                            print(f"  Warning: Error setting transport_name from orders: {transport_err}")
+                            response_data["transport_name"] = None
+        except Exception as order_err:
+            print(f"Warning: Error fetching from orders for party '{party_trimmed}': {order_err}")
+            import traceback
+            traceback.print_exc()
+
+
+        # Return data even if some fields are None - frontend handles this gracefully
+        # Always return a response (even with null values) instead of 404
+        # This allows the frontend to proceed with creating challans even if no historical data exists
+        has_data = any([response_data["station"], response_data["phone_number"],
+                       response_data["price_category"], response_data["transport_name"]])
         
-        # Deduplicate customer names (case-insensitive)
-        seen_customer_names = set()
-        unique_customer_names = []
-        for name in customer_names:
-            normalized = name.strip().lower()
-            if normalized and normalized not in seen_customer_names:
-                seen_customer_names.add(normalized)
-                unique_customer_names.append(name.strip())
+        if has_data:
+            print(f"Found party data for '{party_trimmed}': station={response_data['station']}, price_category={response_data['price_category']}, transport={response_data['transport_name']}")
+        else:
+            print(f"No historical data found for party: '{party_trimmed}' - returning empty response")
         
-        # Deduplicate customer phones
-        seen_customer_phones = set()
-        unique_customer_phones = []
-        for phone in customer_phones:
-            # Normalize phone by removing non-digits for comparison
-            clean_phone = ''.join(filter(str.isdigit, phone.strip()))
-            if clean_phone and clean_phone not in seen_customer_phones:
-                seen_customer_phones.add(clean_phone)
-                unique_customer_phones.append(phone.strip())
-        
-        # Sort for better UX
-        unique_customer_names.sort()
-        unique_customer_phones.sort()
-        
-        # Provide sensible defaults for price categories
-        default_price_categories = ["A", "B", "C", "D", "E", "R"]
-        merged_price_categories = list(dict.fromkeys(price_categories + default_price_categories))
-        
-        # Debug logging with detailed counts (showing orders as primary source)
-        print(f"=== CHALLAN OPTIONS DEBUG ===")
-        print(f"Party names - Orders table (primary): {len(order_party_names)}, Challans table (supplement): {len(challan_party_names)}, Total unique: {len(party_names)}")
-        print(f"Station names - Orders table (primary): {len(order_station_names)}, Challans table (supplement): {len(challan_station_names)}, Total unique: {len(station_names)}")
-        print(f"Customer names from orders: {len(customer_names)} raw, {len(unique_customer_names)} unique")
-        print(f"Customer phones from orders: {len(customer_phones)} raw, {len(unique_customer_phones)} unique")
-        print(f"Customer names sample: {unique_customer_names[:10]}")
-        print(f"Customer phones sample: {unique_customer_phones[:10]}")
-        print(f"All Party Names ({len(party_names)}): {party_names[:50]}{'...' if len(party_names) > 50 else ''}")
-        print(f"All Station Names ({len(station_names)}): {station_names[:50]}{'...' if len(station_names) > 50 else ''}")
-        print(f"=============================")
-        
-        return {
-            "party_names": party_names,
-            "station_names": station_names,
-            "transport_names": transport_names,
-            "price_categories": merged_price_categories,
-            "customer_names": unique_customer_names,
-            "customer_phones": unique_customer_phones,
-            "counts": {
-                "party_names_count": len(party_names),
-                "station_names_count": len(station_names),
-                "transport_names_count": len(transport_names),
-                "price_categories_count": len(merged_price_categories),
-                "customer_names_count": len(unique_customer_names),
-                "customer_phones_count": len(unique_customer_phones),
-            }
-        }
+        # Cache and return the response (even if all fields are None)
+        _party_data_cache[key] = response_data
+        _party_data_cache_time[key] = now
+        return response_data
+            
+    except HTTPException as http_ex:
+        # Never return HTTPException - always return empty response
+        print(f"HTTPException caught for party '{party_trimmed}': {http_ex.status_code} - {http_ex.detail}")
+        import traceback
+        traceback.print_exc()
+        return {"station": None, "phone_number": None, "price_category": None, "transport_name": None}
     except Exception as e:
+        print(f"ERROR fetching party data for '{party_trimmed}': {e}")
+        import traceback
+        traceback.print_exc()
+        # Always return empty response instead of error to prevent 500
+        return {"station": None, "phone_number": None, "price_category": None, "transport_name": None}
+    finally:
+        try:
+            if cursor:
+                cursor.close()
+        except Exception:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+def _dedupe_sort(values: list) -> list:
+    """Deduplicate (case-insensitive) and sort."""
+    seen = set()
+    result = []
+    for v in values:
+        if not v or not str(v).strip():
+            continue
+        normalized = str(v).strip().lower()
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(str(v).strip())
+    result.sort()
+    return result
+
+
+def _get_challan_options_from_db(quick: bool, conn, cursor) -> dict:
+    """Fetch options from DB. quick=True = challans only (faster)."""
+    limit = 2000  # Fetch more data so dropdowns show all options
+    party_names = []
+    station_names = []
+    transport_names = []
+    price_categories = []
+    customer_names = []
+    customer_phones = []
+
+    def _try(fn):
+        try:
+            return fn()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return []
+
+    # Helper to fetch party names from parties table (shop_name column)
+    def _fetch_parties_table_names():
+        try:
+            cursor.execute("""
+                SELECT EXISTS (
+                  SELECT FROM information_schema.tables
+                  WHERE table_name = 'parties'
+                ) AS exists
+            """)
+            ex = cursor.fetchone()
+            table_exists = ex and (ex.get("exists") if isinstance(ex, dict) else ex[0])
+            if table_exists:
+                # Try to fetch shop_name from parties table
+                try:
+                    cursor.execute("""
+                        SELECT DISTINCT shop_name
+                        FROM parties
+                        WHERE shop_name IS NOT NULL AND shop_name <> ''
+                        ORDER BY shop_name
+                        LIMIT %s
+                    """, (limit,))
+                    return [row.get("shop_name") if isinstance(row, dict) else row[0] 
+                           for row in cursor.fetchall() 
+                           if row and (row.get("shop_name") if isinstance(row, dict) else row[0])]
+                except Exception:
+                    # If parties schema is different, return empty list
+                    return []
+            return []
+        except Exception:
+            return []
+    
+    if quick:
+        # Challans only - 4 queries, much faster (no orders table)
+        # Also include parties table for party names
+        parties_names = _try(_fetch_parties_table_names)
+        party_names = _dedupe_sort(
+            _try(lambda: fetch_distinct_values(cursor, "challans", "party_name", limit=limit))
+            + parties_names
+        )
+        station_names = _dedupe_sort(
+            _try(lambda: fetch_distinct_values(cursor, "challans", "station_name", limit=limit))
+        )
+        transport_names = _dedupe_sort(
+            _try(lambda: fetch_distinct_values(cursor, "challans", "transport_name", limit=limit))
+        )
+        price_categories = _try(lambda: fetch_distinct_values(cursor, "challans", "price_category", limit=limit))
+    else:
+        # Full: orders + challans + parties table
+        parties_names = _try(_fetch_parties_table_names)
+        party_names = _dedupe_sort(
+            _try(lambda: fetch_distinct_values(cursor, "orders", "party_name", limit=limit))
+            + _try(lambda: fetch_distinct_values(cursor, "challans", "party_name", limit=limit))
+            + parties_names
+        )
+        station_names = _dedupe_sort(
+            _try(lambda: fetch_distinct_values(cursor, "orders", "station", limit=limit))
+            + _try(lambda: fetch_distinct_values(cursor, "challans", "station_name", limit=limit))
+        )
+        transport_names = _dedupe_sort(
+            _try(lambda: fetch_distinct_values(cursor, "orders", "transport_name", limit=limit))
+            + _try(lambda: fetch_distinct_values(cursor, "challans", "transport_name", limit=limit))
+        )
+        price_categories = _try(lambda: fetch_distinct_values(cursor, "challans", "price_category", limit=limit))
+        customer_names = _dedupe_sort(
+            _try(lambda: fetch_distinct_values(cursor, "orders", "customer_name", limit=limit))
+        )
+        customer_phones_raw = _try(lambda: fetch_distinct_values(cursor, "orders", "customer_phone", limit=limit))
+        seen_phone = set()
+        for p in customer_phones_raw:
+            if not p or not str(p).strip():
+                continue
+            clean = "".join(filter(str.isdigit, str(p).strip()))
+            if clean and clean not in seen_phone:
+                seen_phone.add(clean)
+                customer_phones.append(str(p).strip())
+        customer_phones.sort()
+
+    default_price_categories = ["A", "B", "C", "D", "E", "R"]
+    merged_price_categories = list(dict.fromkeys(price_categories + default_price_categories))
+    return {
+        "party_names": party_names,
+        "station_names": station_names,
+        "transport_names": transport_names,
+        "price_categories": merged_price_categories,
+        "customer_names": customer_names,
+        "customer_phones": customer_phones,
+        "counts": {
+            "party_names_count": len(party_names),
+            "station_names_count": len(station_names),
+            "transport_names_count": len(transport_names),
+            "price_categories_count": len(merged_price_categories),
+            "customer_names_count": len(customer_names),
+            "customer_phones_count": len(customer_phones),
+        }
+    }
+
+
+_challan_options_quick_cache = None
+_challan_options_quick_cache_time = 0
+
+
+@app.get(
+    "/api/challan/options",
+    summary="Get challan options",
+    description="Returns party names, stations, etc. Use ?quick=1 for faster load (challans only).",
+    tags=["Challan"],
+)
+def get_challan_options(quick: bool = False):
+    """Options for challan/order forms. quick=True uses challans only (faster)."""
+    global _challan_options_cache, _challan_options_cache_time
+    global _challan_options_quick_cache, _challan_options_quick_cache_time
+    now = datetime.now().timestamp()
+    if quick:
+        if _challan_options_quick_cache and (now - _challan_options_quick_cache_time) < CHALLAN_OPTIONS_CACHE_TTL:
+            return _challan_options_quick_cache
+    else:
+        if _challan_options_cache and (now - _challan_options_cache_time) < CHALLAN_OPTIONS_CACHE_TTL:
+            return _challan_options_cache
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(row_factory=dict_row)
+        result = _get_challan_options_from_db(quick=quick, conn=conn, cursor=cursor)
+        if quick:
+            _challan_options_quick_cache = result
+            _challan_options_quick_cache_time = now
+        else:
+            _challan_options_cache = result
+            _challan_options_cache_time = now
+        return result
+    except Exception as e:
+        import traceback
+        print(f"Error in get_challan_options: {e}")
+        print(traceback.format_exc())
         raise HTTPException(
             status_code=500,
             detail=f"Error fetching challan options: {str(e)}"
@@ -2300,10 +2921,47 @@ def get_challan_options():
                 cursor.close()
             conn.close()
 
+@app.get("/api/debug/column-types")
+def debug_column_types():
+    """Diagnostic endpoint to check actual column types in database."""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(row_factory=dict_row)
+        cursor.execute("""
+            SELECT table_name, column_name, data_type, character_maximum_length
+            FROM information_schema.columns
+            WHERE table_name IN ('challans', 'orders')
+            AND column_name IN ('party_name', 'station_name', 'transport_name', 'challan_number')
+            ORDER BY table_name, column_name
+        """)
+        results = cursor.fetchall()
+        return {
+            "columns": [
+                {
+                    "table": r.get("table_name") if isinstance(r, dict) else r[0],
+                    "column": r.get("column_name") if isinstance(r, dict) else r[1],
+                    "type": r.get("data_type") if isinstance(r, dict) else r[2],
+                    "max_length": r.get("character_maximum_length") if isinstance(r, dict) else r[3]
+                }
+                for r in results
+            ]
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
 @app.post("/api/challans")
 def create_challan(challan_data: dict):
     """
     Create a challan with header details and line items.
+    Safe for concurrent submissions from multiple devices: challan numbers are
+    generated under an advisory lock and INSERT is retried on duplicate number.
     """
     required_fields = ["party_name", "station_name", "transport_name"]
     missing_fields = [field for field in required_fields if not challan_data.get(field)]
@@ -2321,8 +2979,37 @@ def create_challan(challan_data: dict):
     try:
         conn = get_db_connection()
         cursor = conn.cursor(row_factory=dict_row)
-        ensure_challan_tables(cursor)
+        ensure_challan_tables(cursor, conn)
         conn.commit()  # Commit table creation before inserting data
+        
+        # Explicitly ensure VARCHAR columns are correct size RIGHT BEFORE insert
+        # Use direct SQL to be absolutely sure
+        try:
+            print("Running pre-insert column migration...")
+            migration_queries = [
+                "ALTER TABLE challans ALTER COLUMN party_name TYPE VARCHAR(255) USING party_name::VARCHAR(255)",
+                "ALTER TABLE challans ALTER COLUMN station_name TYPE VARCHAR(255) USING station_name::VARCHAR(255)",
+                "ALTER TABLE challans ALTER COLUMN transport_name TYPE VARCHAR(255) USING transport_name::VARCHAR(255)",
+                "ALTER TABLE challans ALTER COLUMN challan_number TYPE VARCHAR(255) USING challan_number::VARCHAR(255)",
+            ]
+            for query in migration_queries:
+                try:
+                    cursor.execute(query)
+                    conn.commit()
+                    print(f"✓ Executed: {query}")
+                except Exception as q_err:
+                    error_msg = str(q_err).lower()
+                    if 'already' not in error_msg and 'does not exist' not in error_msg:
+                        print(f"Warning: Migration query failed (may already be correct): {q_err}")
+            
+            # Also run the migration function as backup
+            _migrate_varchar_columns(cursor, conn)
+            conn.commit()
+            print("Pre-insert migration completed")
+        except Exception as migrate_err:
+            print(f"Warning: Pre-insert migration check failed: {migrate_err}")
+            import traceback
+            traceback.print_exc()
         
         prepared_items = []
         total_amount = 0.0
@@ -2367,6 +3054,23 @@ def create_challan(challan_data: dict):
                 if not product_name:
                     raise HTTPException(status_code=400, detail="Each item must include a product name")
                 
+                # Look up unit and GST from products_master
+                item_unit = item.get("unit", "piece")
+                item_gst = 0
+                try:
+                    if product_id:
+                        cursor.execute("SELECT gst, unit FROM products_master WHERE id = %s", (product_id,))
+                    else:
+                        cursor.execute("SELECT gst, unit FROM products_master WHERE name = %s LIMIT 1", (product_name,))
+                    pm_row = cursor.fetchone()
+                    if pm_row:
+                        if pm_row.get("unit"):
+                            item_unit = pm_row["unit"]
+                        if pm_row.get("gst") and total_price > 0:
+                            item_gst = round(total_price * float(pm_row["gst"]) / 100)
+                except Exception as lu_err:
+                    print(f"Warning: Could not look up unit/GST for {product_name}: {lu_err}")
+
                 prepared_items.append({
                     "product_id": product_id,
                     "product_name": product_name,
@@ -2375,7 +3079,9 @@ def create_challan(challan_data: dict):
                     "quantity": quantity,
                     "unit_price": unit_price,
                     "total_price": total_price,
-                    "qr_code": qr_code_value
+                    "qr_code": qr_code_value,
+                    "unit": item_unit,
+                    "gst": item_gst
                 })
                 
                 total_amount += total_price
@@ -2397,24 +3103,25 @@ def create_challan(challan_data: dict):
                 status_code=400,
                 detail="party_name, station_name, and transport_name are required"
             )
-        
-        # Check if there's an existing challan with the same party name that has no items
-        # This allows reusing challan numbers for challans that were created but never had items added
-        existing_empty_challan = None
+
+        # Auto-create party in parties table if not exists
         try:
-            cursor.execute("""
-                SELECT c.* 
-                FROM challans c
-                LEFT JOIN challan_items ci ON c.id = ci.challan_id
-                WHERE c.party_name = %s 
-                  AND c.total_quantity = 0
-                  AND ci.id IS NULL
-                ORDER BY c.created_at DESC
-                LIMIT 1
-            """, (party_name,))
-            existing_empty_challan = cursor.fetchone()
-        except Exception as e:
-            print(f"Warning: Could not check for existing empty challan: {e}")
+            cursor.execute(
+                "SELECT id FROM parties WHERE LOWER(TRIM(shop_name)) = LOWER(TRIM(%s)) LIMIT 1",
+                (party_name,)
+            )
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO parties (shop_name, station, price_category) VALUES (%s, %s, %s)",
+                    (party_name.strip(), station_name.strip() if station_name else None, price_category or 'A')
+                )
+                print(f"Auto-created party: {party_name} / {station_name}")
+        except Exception as party_err:
+            print(f"Warning: Could not auto-create party {party_name}: {party_err}")
+        
+        # Always create a new challan with a new number so each device/session gets a unique challan.
+        # (Previously we reused an empty challan for the same party, which caused the same number
+        # to appear on another device when opening the same party.)
         
         # Convert metadata to JSON string if it's a dict
         metadata_json = None
@@ -2426,123 +3133,122 @@ def create_challan(challan_data: dict):
             else:
                 metadata_json = str(metadata)
         
-        # If an empty challan exists, update it instead of creating a new one
-        if existing_empty_challan:
-            challan_id = existing_empty_challan["id"]
-            challan_number = existing_empty_challan["challan_number"]
-            current_status = existing_empty_challan.get("status", "draft")
-            
-            # If challan is in a finalized state (ready, in_transit, delivered),
-            # remove party name from challan_number, leaving just DC000001
-            finalized_states = ['ready', 'in_transit', 'delivered']
-            new_challan_number = challan_number
-            
-            # Remove party name if challan is in or moving to a finalized state
-            if status in finalized_states:
-                # Check if challan_number has party name format: "PARTY_NAME - DC000001"
-                if ' - DC' in challan_number:
-                    # Extract just the DC part: "DC000001"
-                    # Split by ' - DC' and add 'DC' prefix back
-                    parts = challan_number.split(' - DC')
-                    if len(parts) > 1:
-                        dc_part = 'DC' + parts[-1].strip()
-                        new_challan_number = dc_part
-                        print(f"Removing party name from challan number (status: {status}): {challan_number} -> {new_challan_number}")
-            
-            # Update the existing challan
-            cursor.execute("""
-                UPDATE challans
-                SET station_name = %s,
-                    transport_name = %s,
-                    price_category = %s,
-                    total_amount = %s,
-                    total_quantity = %s,
-                    status = %s,
-                    challan_number = %s,
-                    notes = %s,
-                    metadata = %s,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-                RETURNING *
-            """, (
-                station_name,
-                transport_name,
-                price_category if price_category else None,
-                total_amount,
-                total_quantity,
-                status,
-                new_challan_number,
-                notes if notes else None,
-                metadata_json,
-                challan_id,
-            ))
-            
-            challan_row = cursor.fetchone()
-            if not challan_row:
-                if conn:
-                    conn.rollback()
-                raise HTTPException(status_code=500, detail="Failed to update existing challan")
-            
-            # Delete existing items before inserting new ones
-            cursor.execute("""
-                DELETE FROM challan_items WHERE challan_id = %s
-            """, (challan_id,))
-            
-            print(f"Reusing existing empty challan {challan_number} (ID: {challan_id}) for party {party_name}")
-        else:
-            # No empty challan found, create a new one
-            challan_number = generate_challan_number(cursor, party_name)
-            
-            # If creating with finalized status, remove party name immediately
-            # Otherwise, keep party name for draft challans
-            finalized_states = ['ready', 'in_transit', 'delivered']
-            final_challan_number = challan_number
-            
-            # Remove party name if challan is being created in a finalized state
-            if status in finalized_states:
-                # Check if challan_number has party name format: "PARTY_NAME - DC000001"
-                if ' - DC' in challan_number:
-                    # Extract just the DC part: "DC000001"
-                    # Split by ' - DC' and add 'DC' prefix back
-                    parts = challan_number.split(' - DC')
-                    if len(parts) > 1:
-                        dc_part = 'DC' + parts[-1].strip()
-                        final_challan_number = dc_part
-                        print(f"Removing party name from new challan (status: {status}): {challan_number} -> {final_challan_number}")
-            
-            cursor.execute("""
-                INSERT INTO challans (
-                    challan_number,
+        # Generate challan number and insert. Retry on unique violation so concurrent
+        # submissions from multiple devices never get duplicate numbers or errors.
+        challan_row = None
+        max_create_retries = 3
+        for _create_attempt in range(max_create_retries):
+            try:
+                challan_number = generate_challan_number(cursor, party_name)
+                finalized_states = ['ready', 'in_transit', 'delivered']
+                final_challan_number = challan_number
+                if status in finalized_states:
+                    if ' - DC' in challan_number:
+                        parts = challan_number.split(' - DC')
+                        if len(parts) > 1:
+                            dc_part = 'DC' + parts[-1].strip()
+                            final_challan_number = dc_part
+                            print(f"Removing party name from new challan (status: {status}): {challan_number} -> {final_challan_number}")
+                if not final_challan_number:
+                    final_challan_number = challan_number
+                number_to_insert = (final_challan_number or challan_number or "").strip() or challan_number
+                cursor.execute("""
+                    INSERT INTO challans (
+                        challan_number,
+                        party_name,
+                        station_name,
+                        transport_name,
+                        price_category,
+                        total_amount,
+                        total_quantity,
+                        gst_amount,
+                        apply_gst,
+                        status,
+                        notes,
+                        metadata
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                """, (
+                    number_to_insert,
                     party_name,
                     station_name,
                     transport_name,
-                    price_category,
+                    price_category if price_category else None,
                     total_amount,
                     total_quantity,
+                    sum(p.get("gst", 0) for p in prepared_items) if prepared_items else 0,
+                    'Auto',
                     status,
-                    notes,
-                    metadata
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING *
-            """, (
-                final_challan_number,
-                party_name,
-                station_name,
-                transport_name,
-                price_category if price_category else None,
-                total_amount,
-                total_quantity,
-                status,
-                notes if notes else None,
-                metadata_json,
-            ))
-            
-            challan_row = cursor.fetchone()
-            if not challan_row:
-                if conn:
+                    notes if notes else None,
+                    metadata_json,
+                ))
+                challan_row = cursor.fetchone()
+                break
+            except Exception as insert_err:
+                error_msg = str(insert_err)
+                error_lower = error_msg.lower()
+                
+                if getattr(insert_err, "sqlstate", None) == "23505":
                     conn.rollback()
-                raise HTTPException(status_code=500, detail="Failed to create challan")
+                    if _create_attempt == max_create_retries - 1:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Failed to create challan after retries (duplicate number). Please try again.",
+                        )
+                    continue
+                
+                # If it's a VARCHAR(50) error, try to migrate again and retry
+                if "varying(50)" in error_lower or "character varying(50)" in error_lower or "value too long" in error_lower:
+                    print(f"VARCHAR(50) error detected! Attempting emergency migration...")
+                    print(f"Error: {error_msg}")
+                    print(f"Party name: '{party_name}' (length: {len(party_name) if party_name else 0})")
+                    print(f"Station name: '{station_name}' (length: {len(station_name) if station_name else 0})")
+                    print(f"Transport name: '{transport_name}' (length: {len(transport_name) if transport_name else 0})")
+                    print(f"Challan number would be: '{number_to_insert}' (length: {len(number_to_insert) if number_to_insert else 0})")
+                    try:
+                        # Emergency migration - migrate ALL relevant columns
+                        _migrate_varchar_columns(cursor, conn)
+                        conn.commit()
+                        print("Emergency migration completed, retrying insert...")
+                        # Retry the insert
+                        continue
+                    except Exception as migrate_err:
+                        print(f"Emergency migration failed: {migrate_err}")
+                        import traceback
+                        traceback.print_exc()
+                        # Still raise the original error
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Database column size error. Please contact support. Error: {error_msg}"
+                        )
+                
+                # Log the error details
+                import traceback
+                print(f"Insert error: {error_msg}")
+                print(f"Challan data: party_name='{party_name[:50] if party_name else None}', station_name='{station_name}', transport_name='{transport_name}'")
+                print(f"Challan number: '{number_to_insert}'")
+                traceback.print_exc()
+                
+                # If it's the last attempt, provide a more helpful error message
+                if _create_attempt == max_create_retries - 1:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to create challan: {error_msg}"
+                    )
+                raise
+        if not challan_row:
+            if conn:
+                conn.rollback()
+            raise HTTPException(status_code=500, detail="Failed to create challan")
+        
+        # Set final_challan_number from the row we just wrote
+        final_challan_number = (challan_row.get("challan_number") or "").strip()
+        
+        # Final safety check: ensure final_challan_number is always set (should never be empty at this point)
+        if not final_challan_number:
+            final_challan_number = challan_row.get("challan_number") or generate_challan_number(cursor, party_name)
+            print(f"Warning: final_challan_number was empty after if/else, using fallback: {final_challan_number}")
         
         inserted_items = []
         # Insert items only if they were provided
@@ -2564,9 +3270,11 @@ def create_challan(challan_data: dict):
                         quantity,
                         unit_price,
                         total_price,
-                        qr_code
+                        qr_code,
+                        unit,
+                        gst
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                 """, (
                     challan_row["id"],
@@ -2578,6 +3286,8 @@ def create_challan(challan_data: dict):
                     prepared["unit_price"],
                     prepared["total_price"],
                     qr_code_value,
+                    prepared.get("unit", "piece"),
+                    prepared.get("gst", 0),
                 ))
                 item_row = cursor.fetchone()
                 if item_row:
@@ -2610,7 +3320,7 @@ def create_challan(challan_data: dict):
                     # Add challan_number column to orders table
                     cursor.execute("""
                         ALTER TABLE orders 
-                        ADD COLUMN challan_number VARCHAR(50)
+                        ADD COLUMN challan_number VARCHAR(255)
                     """)
                     print("Added challan_number column to orders table")
                 
@@ -2622,12 +3332,15 @@ def create_challan(challan_data: dict):
                 
                 if order_exists:
                     # Update all orders with this order_number to include challan_number
-                    cursor.execute("""
-                        UPDATE orders 
-                        SET challan_number = %s 
-                        WHERE order_number = %s
-                    """, (challan_number, order_number))
-                    print(f"Updated orders with order_number {order_number} to include challan_number {challan_number}")
+                    # Use challan_row["challan_number"] which is set in both UPDATE and INSERT paths
+                    challan_number_for_order = challan_row.get("challan_number")
+                    if challan_number_for_order:
+                        cursor.execute("""
+                            UPDATE orders 
+                            SET challan_number = %s 
+                            WHERE order_number = %s
+                        """, (challan_number_for_order, order_number))
+                        print(f"Updated orders with order_number {order_number} to include challan_number {challan_number_for_order}")
                 else:
                     print(f"Warning: Order with order_number {order_number} does not exist, skipping challan_number update")
             except Exception as update_error:
@@ -2660,7 +3373,8 @@ def create_challan(challan_data: dict):
                 ORDER BY id
             """, (challan_row["id"],))
             inserted_items = cursor.fetchall()
-        
+
+        _clear_challans_list_cache()
         return serialize_challan(challan_row, inserted_items)
     except HTTPException:
         raise
@@ -2693,10 +3407,10 @@ def update_challan(challan_id: int, challan_data: dict):
     try:
         conn = get_db_connection()
         cursor = conn.cursor(row_factory=dict_row)
-        ensure_challan_tables(cursor)
+        # Tables ensured at startup
         
-        # Check if challan exists
-        cursor.execute("SELECT * FROM challans WHERE id = %s", (challan_id,))
+        # Lock challan row so concurrent updates from different devices are serialized (no interleaved updates)
+        cursor.execute("SELECT * FROM challans WHERE id = %s FOR UPDATE", (challan_id,))
         challan_row = cursor.fetchone()
         if not challan_row:
             raise HTTPException(status_code=404, detail="Challan not found")
@@ -2725,26 +3439,61 @@ def update_challan(challan_id: int, challan_data: dict):
                 size_text = item.get("size_text")
                 qr_code_value = item.get("qr_code")
                 
-                # Try to fetch product details if product_id is provided
+                # Resolve product_id: challan_items FK needs product_catalog.id; app may send products_master.id
                 if product_id:
                     try:
-                        cursor.execute("""
-                            SELECT name, qr_code 
-                            FROM product_catalog 
-                            WHERE id = %s
-                        """, (product_id,))
+                        cursor.execute(
+                            "SELECT id, name, qr_code FROM product_catalog WHERE id = %s",
+                            (product_id,))
                         product_row = cursor.fetchone()
                         if product_row:
                             if not product_name:
                                 product_name = product_row.get("name")
                             if not qr_code_value:
                                 qr_code_value = product_row.get("qr_code")
+                        else:
+                            try:
+                                cursor.execute("""
+                                    SELECT pc.id, pc.name, pc.qr_code
+                                    FROM products_master pm
+                                    JOIN product_catalog pc ON pm.external_id = pc.external_id
+                                    WHERE pm.id = %s LIMIT 1
+                                """, (product_id,))
+                                product_row = cursor.fetchone()
+                                if product_row:
+                                    product_id = product_row["id"]
+                                    if not product_name:
+                                        product_name = product_row.get("name")
+                                    if not qr_code_value:
+                                        qr_code_value = product_row.get("qr_code")
+                                else:
+                                    product_id = None
+                            except Exception:
+                                product_id = None
                     except Exception as e:
-                        print(f"Warning: Could not fetch product details for id {product_id}: {e}")
+                        conn.rollback()
+                        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
                 
                 if not product_name:
                     raise HTTPException(status_code=400, detail="Each item must include a product name")
                 
+                # Look up unit and GST from products_master
+                item_unit = item.get("unit", "piece")
+                item_gst = 0
+                try:
+                    if product_id:
+                        cursor.execute("SELECT gst, unit FROM products_master WHERE id = %s", (product_id,))
+                    else:
+                        cursor.execute("SELECT gst, unit FROM products_master WHERE name = %s LIMIT 1", (product_name,))
+                    pm_row = cursor.fetchone()
+                    if pm_row:
+                        if pm_row.get("unit"):
+                            item_unit = pm_row["unit"]
+                        if pm_row.get("gst") and total_price > 0:
+                            item_gst = round(total_price * float(pm_row["gst"]) / 100)
+                except Exception as lu_err:
+                    print(f"Warning: Could not look up unit/GST for {product_name}: {lu_err}")
+
                 prepared_items.append({
                     "product_id": product_id,
                     "product_name": product_name,
@@ -2753,7 +3502,9 @@ def update_challan(challan_id: int, challan_data: dict):
                     "quantity": quantity,
                     "unit_price": unit_price,
                     "total_price": total_price,
-                    "qr_code": qr_code_value
+                    "qr_code": qr_code_value,
+                    "unit": item_unit,
+                    "gst": item_gst
                 })
                 
                 total_amount += total_price
@@ -2781,9 +3532,11 @@ def update_challan(challan_id: int, challan_data: dict):
                         quantity,
                         unit_price,
                         total_price,
-                        qr_code
+                        qr_code,
+                        unit,
+                        gst
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                 """, (
                     challan_id,
@@ -2795,6 +3548,8 @@ def update_challan(challan_id: int, challan_data: dict):
                     prepared["unit_price"],
                     prepared["total_price"],
                     qr_code_value,
+                    prepared.get("unit", "piece"),
+                    prepared.get("gst", 0),
                 ))
                 item_row = cursor.fetchone()
                 if item_row:
@@ -2804,16 +3559,16 @@ def update_challan(challan_id: int, challan_data: dict):
         status = challan_data.get("status", challan_row.get("status", "draft"))
         if status != "draft" and len(prepared_items) == 0:
             raise HTTPException(status_code=400, detail="Cannot finalize challan without items")
-        
+
         # If challan is in a finalized state (ready, in_transit, delivered),
         # remove party name from challan_number, leaving just DC000001
         current_status = challan_row.get("status", "draft")
         current_challan_number = challan_row.get("challan_number", "")
         new_challan_number = current_challan_number
-        
+
         # Finalized states where party name should be removed
         finalized_states = ['ready', 'in_transit', 'delivered']
-        
+
         # Remove party name if challan is in or moving to a finalized state
         if status in finalized_states:
             # Check if challan_number has party name format: "PARTY_NAME - DC000001"
@@ -2825,17 +3580,31 @@ def update_challan(challan_id: int, challan_data: dict):
                     dc_part = 'DC' + parts[-1].strip()
                     new_challan_number = dc_part
                     print(f"Removing party name from challan number (status: {status}): {current_challan_number} -> {new_challan_number}")
-        
+
+        # Allow updating party details when reusing an empty draft (party_name, station_name, etc.)
+        party_name = challan_data.get("party_name")
+        station_name = challan_data.get("station_name")
+        transport_name = challan_data.get("transport_name")
+        price_category = challan_data.get("price_category")
+
         cursor.execute("""
             UPDATE challans
             SET total_amount = %s,
                 total_quantity = %s,
                 status = %s,
                 challan_number = %s,
+                party_name = COALESCE(%s, party_name),
+                station_name = COALESCE(%s, station_name),
+                transport_name = COALESCE(%s, transport_name),
+                price_category = COALESCE(%s, price_category),
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = %s
             RETURNING *
-        """, (total_amount, total_quantity, status, new_challan_number, challan_id))
+        """, (
+            total_amount, total_quantity, status, new_challan_number,
+            party_name, station_name, transport_name, price_category,
+            challan_id,
+        ))
         
         updated_challan = cursor.fetchone()
         if not updated_challan:
@@ -2864,7 +3633,8 @@ def update_challan(challan_id: int, challan_data: dict):
                 ORDER BY id
             """, (challan_id,))
             inserted_items = cursor.fetchall()
-        
+
+        _clear_challans_list_cache()
         return serialize_challan(updated_challan, inserted_items)
     except HTTPException:
         raise
@@ -2886,67 +3656,77 @@ def update_challan(challan_id: int, challan_data: dict):
                 cursor.close()
             conn.close()
 
+def _clear_challans_list_cache():
+    """Clear list cache when challans are created/updated."""
+    global _challans_list_cache, _challans_list_cache_time
+    _challans_list_cache.clear()
+    _challans_list_cache_time.clear()
+
+
 @app.get("/api/challans")
 def list_challans(status: str = None, search: str = None, limit: int = 50):
     """
-    Retrieve challans with optional filtering.
+    Retrieve challans with optional filtering. Cached 30s to avoid timeout on retry.
     """
+    global _challans_list_cache, _challans_list_cache_time
+    cache_key = (status or "", search or "", min(limit, 100))
+    now = datetime.now().timestamp()
+    if cache_key in _challans_list_cache and (now - _challans_list_cache_time.get(cache_key, 0)) < 30:
+        return _challans_list_cache[cache_key]
+
     conn = None
     cursor = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor(row_factory=dict_row)
-        ensure_challan_tables(cursor)
-        
+
+        # Simple SELECT without JOIN - avoids expensive GROUP BY; item_count fetched separately in batch
         query = """
-            SELECT 
-                c.id,
-                c.challan_number,
-                c.party_name,
-                c.station_name,
-                c.transport_name,
-                c.price_category,
-                c.total_amount,
-                c.total_quantity,
-                c.status,
-                c.notes,
-                c.created_at,
-                c.updated_at,
-                COUNT(ci.id) AS item_count
-            FROM challans c
-            LEFT JOIN challan_items ci ON ci.challan_id = c.id
+            SELECT id, challan_number, party_name, station_name, transport_name,
+                   price_category, total_amount, total_quantity, status, notes,
+                   created_at, updated_at
+            FROM challans
         """
         conditions = []
         params = []
-        
+
         if status:
-            conditions.append("c.status = %s")
+            conditions.append("status = %s")
             params.append(status)
-        
+
         if search:
             search_term = f"%{search.lower()}%"
-            conditions.append("(LOWER(c.challan_number) LIKE %s OR LOWER(c.party_name) LIKE %s)")
+            conditions.append("(LOWER(challan_number) LIKE %s OR LOWER(party_name) LIKE %s)")
             params.extend([search_term, search_term])
-        
+
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        
-        query += " GROUP BY c.id ORDER BY c.created_at DESC LIMIT %s"
-        params.append(limit)
-        
+
+        query += " ORDER BY created_at DESC LIMIT %s"
+        params.append(min(limit, 100))
+
         cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
-        
+
         challans = []
-        for row in rows:
-            serialized = serialize_challan(row)
-            serialized["item_count"] = row.get("item_count", 0)
-            challans.append(serialized)
-        
-        return {
-            "count": len(challans),
-            "challans": challans
-        }
+        if rows:
+            ids = [r["id"] for r in rows]
+            # Batch fetch item counts
+            placeholders = ",".join(["%s"] * len(ids))
+            cursor.execute(
+                f"SELECT challan_id, COUNT(*) AS cnt FROM challan_items WHERE challan_id IN ({placeholders}) GROUP BY challan_id",
+                tuple(ids)
+            )
+            count_map = {r["challan_id"]: r["cnt"] for r in cursor.fetchall()}
+            for row in rows:
+                serialized = serialize_challan(row)
+                serialized["item_count"] = count_map.get(row["id"], 0)
+                challans.append(serialized)
+
+        result = {"count": len(challans), "challans": challans}
+        _challans_list_cache[cache_key] = result
+        _challans_list_cache_time[cache_key] = now
+        return result
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -2958,6 +3738,68 @@ def list_challans(status: str = None, search: str = None, limit: int = 50):
                 cursor.close()
             conn.close()
 
+
+@app.get("/api/challans/empty-drafts")
+def list_empty_draft_challans(limit: int = 10):
+    """
+    Return draft challans that have zero items. Used to reuse an existing empty challan
+    instead of creating a new one when user enters party details again.
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(row_factory=dict_row)
+        ensure_challan_tables(cursor, conn)
+        # Draft challans with no rows in challan_items (or not in challan_items at all)
+        # Use COALESCE to handle NULL updated_at gracefully
+        cursor.execute("""
+            SELECT c.*
+            FROM challans c
+            LEFT JOIN (
+                SELECT challan_id, COUNT(*) AS cnt
+                FROM challan_items
+                GROUP BY challan_id
+            ) ci ON c.id = ci.challan_id
+            WHERE c.status = 'draft'
+              AND (ci.cnt IS NULL OR ci.cnt = 0)
+            ORDER BY COALESCE(c.updated_at, c.created_at) DESC, c.created_at DESC
+            LIMIT %s
+        """, (min(limit, 50),))
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append(serialize_challan(row, items=[]))
+        return {"count": len(result), "challans": result}
+    except Exception as e:
+        import traceback
+        error_msg = str(e) if str(e) else "Unknown error"
+        error_lower = error_msg.lower()
+        print(f"list_empty_draft_challans error: {error_msg}")
+        traceback.print_exc()
+        
+        # If it's a VARCHAR(50) error, try to migrate
+        if "varying(50)" in error_lower or "character varying(50)" in error_lower or "value too long" in error_lower:
+            print("VARCHAR(50) error in empty-drafts endpoint! Attempting migration...")
+            try:
+                if conn and cursor:
+                    _migrate_varchar_columns(cursor, conn)
+                    conn.commit()
+                    print("Migration completed, you may need to retry the request")
+            except Exception as migrate_err:
+                print(f"Migration failed: {migrate_err}")
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching empty draft challans: {error_msg}"
+        )
+    finally:
+        if conn:
+            if cursor:
+                cursor.close()
+            conn.close()
+
+
 @app.get("/api/challans/{challan_id}")
 def get_challan(challan_id: int):
     """
@@ -2968,7 +3810,7 @@ def get_challan(challan_id: int):
     try:
         conn = get_db_connection()
         cursor = conn.cursor(row_factory=dict_row)
-        ensure_challan_tables(cursor)
+        ensure_challan_tables(cursor, conn)
         
         cursor.execute("SELECT * FROM challans WHERE id = %s", (challan_id,))
         challan_row = cursor.fetchone()
@@ -2987,6 +3829,9 @@ def get_challan(challan_id: int):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        print(f"get_challan({challan_id}) error: {e}")
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"Error retrieving challan: {str(e)}"
@@ -3001,6 +3846,8 @@ def get_challan(challan_id: int):
 def get_challan_by_number(challan_number: str):
     """
     Retrieve challan by challan number.
+    Accepts full format (e.g. "PARTY - DC009504") or DC-only format (e.g. "DC009504").
+    Finalized challans are stored as DC-only, so we try exact match first, then DC part.
     """
     conn = None
     cursor = None
@@ -3008,9 +3855,24 @@ def get_challan_by_number(challan_number: str):
         conn = get_db_connection()
         cursor = conn.cursor(row_factory=dict_row)
         ensure_challan_tables(cursor)
-        
-        cursor.execute("SELECT * FROM challans WHERE challan_number = %s", (challan_number,))
+
+        num = (challan_number or "").strip()
+        cursor.execute("SELECT * FROM challans WHERE challan_number = %s", (num,))
         challan_row = cursor.fetchone()
+        # If not found and input looks like "PARTY - DC009504", try DC part (how finalized challans are stored)
+        if not challan_row and " - DC" in num:
+            parts = num.split(" - DC", 1)
+            if len(parts) > 1:
+                dc_part = "DC" + parts[-1].strip()
+                cursor.execute("SELECT * FROM challans WHERE challan_number = %s", (dc_part,))
+                challan_row = cursor.fetchone()
+        # If still not found, input may be DC-only (e.g. "DC009505") but DB has "PARTY - DC009505"
+        if not challan_row and re.match(r"^DC\d+$", num, re.IGNORECASE):
+            cursor.execute(
+                "SELECT * FROM challans WHERE challan_number = %s OR challan_number LIKE %s",
+                (num, f"% - {num}"),
+            )
+            challan_row = cursor.fetchone()
         if not challan_row:
             raise HTTPException(status_code=404, detail="Challan not found")
         
@@ -3026,9 +3888,110 @@ def get_challan_by_number(challan_number: str):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        print(f"get_challan_by_number({challan_number!r}) error: {e}")
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"Error retrieving challan: {str(e)}"
+        )
+    finally:
+        if conn:
+            if cursor:
+                cursor.close()
+            conn.close()
+
+@app.delete("/api/challans/{challan_id}")
+def delete_challan(challan_id: int):
+    """
+    Delete a challan by ID.
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(row_factory=dict_row)
+        
+        # First, delete all items associated with this challan
+        cursor.execute("DELETE FROM challan_items WHERE challan_id = %s", (challan_id,))
+        
+        # Then delete the challan itself
+        cursor.execute("DELETE FROM challans WHERE id = %s RETURNING challan_number", (challan_id,))
+        deleted_challan = cursor.fetchone()
+        
+        if not deleted_challan:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="Challan not found")
+        
+        conn.commit()
+        return {
+            "message": f"Challan {deleted_challan['challan_number']} deleted successfully",
+            "challan_id": challan_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error deleting challan: {str(e)}"
+        )
+    finally:
+        if conn:
+            if cursor:
+                cursor.close()
+            conn.close()
+
+@app.delete("/api/challans/by-number/{challan_number}")
+def delete_challan_by_number(challan_number: str):
+    """
+    Delete a challan by challan number. Accepts "PARTY - DC009485" or "DC009485".
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(row_factory=dict_row)
+        
+        # First get the challan ID (exact match, or by DC number)
+        cursor.execute("SELECT id, challan_number FROM challans WHERE challan_number = %s", (challan_number.strip(),))
+        challan_row = cursor.fetchone()
+        if not challan_row:
+            # Fallback: extract DC number (e.g. DC009485 from "SSN DEL - DC009485" or "009485")
+            dc_match = re.search(r'DC(\d+)', challan_number, re.IGNORECASE)
+            dc_part = f"DC{dc_match.group(1)}" if dc_match else (f"DC{challan_number.strip()}" if challan_number.strip().isdigit() else None)
+            if dc_part:
+                cursor.execute(
+                    "SELECT id, challan_number FROM challans WHERE challan_number = %s OR challan_number LIKE %s",
+                    (dc_part, f"% - {dc_part}"))
+                challan_row = cursor.fetchone()
+        if not challan_row:
+            raise HTTPException(status_code=404, detail=f"Challan with number '{challan_number}' not found")
+        
+        challan_id = challan_row["id"]
+        
+        # Delete all items associated with this challan
+        cursor.execute("DELETE FROM challan_items WHERE challan_id = %s", (challan_id,))
+        
+        # Then delete the challan itself
+        cursor.execute("DELETE FROM challans WHERE id = %s", (challan_id,))
+        
+        conn.commit()
+        actual_number = challan_row.get("challan_number", challan_number)
+        _clear_challans_list_cache()
+        return {
+            "message": f"Challan {actual_number} deleted successfully",
+            "challan_id": challan_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error deleting challan: {str(e)}"
         )
     finally:
         if conn:
@@ -3065,7 +4028,7 @@ def get_challan_qr(challan_id: int):
     try:
         conn = get_db_connection()
         cursor = conn.cursor(row_factory=dict_row)
-        ensure_challan_tables(cursor)
+        ensure_challan_tables(cursor, conn)
         
         cursor.execute("SELECT challan_number FROM challans WHERE id = %s", (challan_id,))
         challan_row = cursor.fetchone()
@@ -3294,6 +4257,16 @@ def list_products_master():
                 pm.updated_at,
                 pm.has_consumption,
                 pm.external_created_on,
+                CASE 
+                    WHEN pm.designs IS NULL THEN NULL::jsonb
+                    WHEN jsonb_typeof(pm.designs) = 'object' AND pm.designs ? 'designs' THEN
+                        (SELECT jsonb_agg(
+                            COALESCE(elem->>'design_name', elem->>'design_code', elem->>'name', '')
+                        )
+                        FROM jsonb_array_elements(pm.designs->'designs') AS elem
+                        WHERE COALESCE(elem->>'design_name', elem->>'design_code', elem->>'name', '') != '')
+                    ELSE pm.designs
+                END as designs,
                 pc.qr_code
             FROM products_master pm
             LEFT JOIN product_catalog pc ON pm.external_id = pc.external_id
@@ -3421,6 +4394,47 @@ def list_products_master():
             product_dict['image_url'] = product_dict.get('image')
             product_dict['video_url'] = product_dict.get('video')
             
+            # Process designs field - extract design names from the designs object
+            designs_raw = product_dict.get('designs')
+            product_dict['designs'] = []  # Default to empty list
+            
+            if designs_raw is not None:
+                try:
+                    # Convert to dict if needed (handle psycopg JSONB types)
+                    if not isinstance(designs_raw, dict):
+                        if isinstance(designs_raw, str):
+                            designs_raw = json.loads(designs_raw)
+                        elif hasattr(designs_raw, '__dict__'):
+                            designs_raw = dict(designs_raw)
+                        else:
+                            # Try to convert using json
+                            designs_raw = json.loads(json.dumps(designs_raw))
+                    
+                    # Extract designs array from the object
+                    if isinstance(designs_raw, dict):
+                        if 'designs' in designs_raw:
+                            designs_list = designs_raw['designs']
+                            if isinstance(designs_list, list):
+                                # Extract design_name from each design object
+                                design_names = []
+                                for d in designs_list:
+                                    if isinstance(d, dict):
+                                        design_name = d.get('design_name') or d.get('design_code') or d.get('name')
+                                        if design_name:
+                                            design_names.append(str(design_name))
+                                product_dict['designs'] = design_names
+                        else:
+                            # If it's a dict but doesn't have 'designs' key, try process_designs_field
+                            product_dict['designs'] = process_designs_field(designs_raw)
+                    elif isinstance(designs_raw, list):
+                        # Already a list - process it
+                        product_dict['designs'] = process_designs_field(designs_raw)
+                    else:
+                        product_dict['designs'] = process_designs_field(designs_raw)
+                except Exception as e:
+                    print(f"Error processing designs for product {pm_id}: {e}")
+                    product_dict['designs'] = []
+            
             # Add sizes - use products_master ID as key
             product_dict['sizes'] = sizes_map.get(pm_id, [])
             
@@ -3491,6 +4505,47 @@ def get_product_master(product_id: int):
         product_dict['category_name'] = product_dict.get('category')
         product_dict['image_url'] = product_dict.get('image')
         product_dict['video_url'] = product_dict.get('video')
+        
+        # Process designs field - extract design names from the designs object
+        # IMPORTANT: Process designs AFTER all other field mappings to ensure it's the final value
+        designs_raw = product_dict.get('designs')
+        
+        # Force process designs - extract design_name from each design object
+        if designs_raw is not None:
+            try:
+                # Convert to Python dict if it's a psycopg special type
+                if hasattr(designs_raw, '__class__') and 'psycopg' in str(type(designs_raw)):
+                    # It's a psycopg type, convert to dict
+                    designs_raw = dict(designs_raw) if hasattr(designs_raw, '__iter__') else json.loads(str(designs_raw))
+                
+                # If it's a string, parse it
+                if isinstance(designs_raw, str):
+                    designs_raw = json.loads(designs_raw)
+                
+                # Now process the dict
+                if isinstance(designs_raw, dict) and 'designs' in designs_raw:
+                    designs_list = designs_raw['designs']
+                    if isinstance(designs_list, list):
+                        design_names = []
+                        for d in designs_list:
+                            if isinstance(d, dict):
+                                design_name = d.get('design_name') or d.get('design_code') or d.get('name')
+                                if design_name:
+                                    design_names.append(str(design_name))
+                        product_dict['designs'] = design_names
+                    else:
+                        product_dict['designs'] = []
+                else:
+                    # Try process_designs_field as fallback
+                    product_dict['designs'] = process_designs_field(designs_raw)
+            except Exception as e:
+                print(f"ERROR processing designs for product {product_id}: {e}")
+                print(f"Type: {type(designs_raw)}, Value: {str(designs_raw)[:200]}")
+                import traceback
+                traceback.print_exc()
+                product_dict['designs'] = []
+        else:
+            product_dict['designs'] = []
         
         # Get sizes for this product - check both direct (product_type='master') and via product_catalog
         sizes_list = []
@@ -3574,6 +4629,37 @@ def get_product_master(product_id: int):
             product_dict['updated_at'] = product_dict['updated_at'].isoformat() if hasattr(product_dict['updated_at'], 'isoformat') else str(product_dict['updated_at'])
         if product_dict.get('external_created_on'):
             product_dict['external_created_on'] = product_dict['external_created_on'].isoformat() if hasattr(product_dict['external_created_on'], 'isoformat') else str(product_dict['external_created_on'])
+        
+        # FINAL: Process designs field one more time right before returning to ensure it's correct
+        designs_final = product_dict.get('designs')
+        if designs_final is not None:
+            try:
+                # If it's still a dict with 'designs' key, extract the array
+                if isinstance(designs_final, dict) and 'designs' in designs_final:
+                    designs_list = designs_final.get('designs', [])
+                    if isinstance(designs_list, list):
+                        design_names = []
+                        for d in designs_list:
+                            if isinstance(d, dict):
+                                design_name = d.get('design_name') or d.get('design_code') or d.get('name')
+                                if design_name:
+                                    design_names.append(str(design_name))
+                        # FORCE SET the designs list
+                        product_dict['designs'] = design_names
+                        print(f"FINAL: Set designs to {len(design_names)} items: {design_names[:3]}")
+                elif not isinstance(designs_final, list):
+                    # If it's not a list and not the expected dict format, set to empty
+                    product_dict['designs'] = []
+            except Exception as e:
+                print(f"Final designs processing error: {e}")
+                import traceback
+                traceback.print_exc()
+                product_dict['designs'] = []
+        
+        # Double-check: ensure designs is a list before returning
+        if not isinstance(product_dict.get('designs'), list):
+            print(f"WARNING: designs is not a list, type: {type(product_dict.get('designs'))}, setting to empty list")
+            product_dict['designs'] = []
         
         return product_dict
         
@@ -3785,6 +4871,10 @@ def create_product_master(product_data: dict):
 
 if __name__ == "__main__":
     import uvicorn  # type: ignore
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
+    # Use 0.0.0.0 to listen on all interfaces - required for remote access.
+    # Server will be reachable at http://13.202.81.19:9010/ from remote clients.
+    host = "0.0.0.0"
+    port = 9010
+    print(f"Starting DecoJewels API on http://{host}:{port} (remote: http://13.202.81.19:{port}/) ...")
+    uvicorn.run("main:app", host=host, port=port, reload=False)
 

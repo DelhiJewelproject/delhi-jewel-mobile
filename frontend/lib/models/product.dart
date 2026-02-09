@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'product_size.dart';
 
 class Product {
@@ -11,6 +12,7 @@ class Product {
   final String? qrCode;
   final bool? isActive;
   final List<ProductSize>? sizes;
+  final List<String>? designs; // Product designs (e.g., ['ACK', 'BLK', 'BLC'])
 
   Product({
     this.id,
@@ -23,9 +25,48 @@ class Product {
     this.qrCode,
     this.isActive,
     this.sizes,
+    this.designs,
   });
 
   factory Product.fromJson(Map<String, dynamic> json) {
+    // Parse designs field - can be a list, JSON string, comma-separated string, or object with 'designs' key
+    List<String>? designs;
+    if (json['designs'] != null) {
+      final designsData = json['designs'];
+      
+      if (designsData is List) {
+        // Already a list - convert to List<String>
+        designs = designsData.map((d) => d.toString()).toList();
+      } else if (designsData is Map) {
+        // Object format: {"count": 21, "designs": [...]}
+        if (designsData.containsKey('designs') && designsData['designs'] is List) {
+          final designsList = designsData['designs'] as List;
+          designs = designsList.map((d) {
+            // If d is a Map, extract design_name, design_code, or name
+            if (d is Map) {
+              return (d['design_name'] ?? d['design_code'] ?? d['name'] ?? '').toString();
+            }
+            return d.toString();
+          }).where((d) => d.isNotEmpty).toList();
+        }
+      } else if (designsData is String) {
+        final designsStr = designsData;
+        if (designsStr.trim().startsWith('[')) {
+          // JSON array string
+          try {
+            final parsed = jsonDecode(designsStr) as List;
+            designs = parsed.map((d) => d.toString()).toList();
+          } catch (e) {
+            // If parsing fails, try comma-separated
+            designs = designsStr.split(',').map((d) => d.trim()).where((d) => d.isNotEmpty).toList();
+          }
+        } else {
+          // Comma-separated string
+          designs = designsStr.split(',').map((d) => d.trim()).where((d) => d.isNotEmpty).toList();
+        }
+      }
+    }
+    
     return Product(
       id: json['id'] as int?,
       externalId: json['external_id'] as int?,
@@ -41,6 +82,7 @@ class Product {
               .map((size) => ProductSize.fromJson(size as Map<String, dynamic>))
               .toList()
           : null,
+      designs: designs,
     );
   }
 
@@ -56,6 +98,7 @@ class Product {
       'qr_code': qrCode,
       'is_active': isActive,
       'sizes': sizes?.map((size) => size.toJson()).toList(),
+      'designs': designs,
     };
   }
 

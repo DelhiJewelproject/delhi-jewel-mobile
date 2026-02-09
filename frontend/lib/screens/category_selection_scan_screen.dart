@@ -44,7 +44,7 @@ class _CategorySelectionScanScreenState
   Future<void> _loadPriceCategories() async {
     setState(() => _isLoading = true);
     try {
-      final options = await ApiService.getChallanOptions();
+      final options = await ApiService.getChallanOptions(quick: false);
       if (!mounted) return;
       
       // Extract price categories
@@ -245,6 +245,8 @@ class _CategorySelectionScanScreenState
                           child: Image.network(
                             product.imageUrl!,
                             fit: BoxFit.cover,
+                            cacheWidth: 400,
+                            cacheHeight: 400,
                             errorBuilder: (context, error, stackTrace) => Container(
                               color: Colors.grey.shade200,
                               child: const Icon(

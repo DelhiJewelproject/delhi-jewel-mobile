@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'main_screen.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -60,17 +59,10 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.white,
       body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              const Color(0xFF1A1A1A),
-              const Color(0xFF2D2D2D),
-              const Color(0xFF1A1A1A),
-            ],
-          ),
+        decoration: const BoxDecoration(
+          color: Colors.white,
         ),
         child: SafeArea(
           child: Center(
@@ -81,110 +73,96 @@ class _SplashScreenState extends State<SplashScreen>
                   opacity: _fadeAnimation.value,
                   child: Transform.scale(
                     scale: _scaleAnimation.value,
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        // Logo with elegant styling and glow effect
-                        Container(
-                          padding: const EdgeInsets.all(24),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(30),
-                            boxShadow: [
-                              BoxShadow(
-                                color: const Color(0xFFB8860B).withOpacity(0.5),
-                                blurRadius: 40,
-                                spreadRadius: 10,
-                              ),
-                              BoxShadow(
-                                color: const Color(0xFFB8860B).withOpacity(0.3),
-                                blurRadius: 60,
-                                spreadRadius: 20,
-                              ),
-                            ],
-                          ),
-                          child: CachedNetworkImage(
-                            imageUrl:
-                                'https://app.decojewel.in/assets/images/menu-logo.png',
-                            width: 180,
-                            height: 180,
-                            fit: BoxFit.contain,
-                            placeholder: (context, url) =>
-                                const CircularProgressIndicator(
-                              color: Color(0xFFB8860B),
-                              strokeWidth: 3,
-                            ),
-                            errorWidget: (context, url, error) => Container(
-                              width: 180,
-                              height: 180,
-                              decoration: BoxDecoration(
-                                color: Colors.grey.shade100,
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: const Icon(
-                                Icons.diamond_outlined,
-                                size: 80,
-                                color: Color(0xFFB8860B),
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 50),
-                        // App name with elegant typography
-                        ShaderMask(
-                          shaderCallback: (bounds) => const LinearGradient(
-                            colors: [
-                              Color(0xFFB8860B),
-                              Color(0xFFC9A227),
-                              Color(0xFFB8860B),
-                            ],
-                          ).createShader(bounds),
-                          child: const Text(
-                            'Deco Jewel',
-                            style: TextStyle(
-                              fontSize: 42,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
-                              letterSpacing: 3,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        // const Text(
-                        //   'Premium Deco Collection',
-                        //   style: TextStyle(
-                        //     fontSize: 18,
-                        //     color: Colors.white70,
-                        //     letterSpacing: 2,
-                        //     fontWeight: FontWeight.w300,
-                        //   ),
-                        // ),
-                        const SizedBox(height: 80),
-                        // Loading indicator with custom styling
-                        Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(30),
-                          ),
-                          child: const SizedBox(
-                            width: 40,
-                            height: 40,
-                            child: CircularProgressIndicator(
-                              color: Color(0xFFB8860B),
-                              strokeWidth: 3,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                    child: child,
                   ),
                 );
               },
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Logo with elegant styling (lighter shadow for performance)
+                  Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(30),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFFB8860B).withOpacity(0.35),
+                          blurRadius: 20,
+                          spreadRadius: 4,
+                        ),
+                      ],
+                    ),
+                    child: Image.asset(
+                      'assets/images/menu-logo.png',
+                      width: 180,
+                      height: 180,
+                      fit: BoxFit.contain,
+                      cacheWidth: 360,
+                      cacheHeight: 360,
+                      errorBuilder: (context, error, stackTrace) =>
+                          Container(
+                        width: 180,
+                        height: 180,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Icon(
+                          Icons.diamond_outlined,
+                          size: 80,
+                          color: Color(0xFFB8860B),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 50),
+                  const ShaderMask(
+                    shaderCallback: _goldGradientShader,
+                    child: Text(
+                      'DecoJewels',
+                      style: TextStyle(
+                        fontSize: 42,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                        letterSpacing: 3,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 80),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFB8860B).withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(30),
+                    ),
+                    child: const SizedBox(
+                      width: 40,
+                      height: 40,
+                      child: CircularProgressIndicator(
+                        color: Color(0xFFB8860B),
+                        strokeWidth: 3,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
       ),
     );
   }
+}
+
+Shader _goldGradientShader(Rect bounds) {
+  return const LinearGradient(
+    colors: [
+      Color(0xFFB8860B),
+      Color(0xFFC9A227),
+      Color(0xFFB8860B),
+    ],
+  ).createShader(bounds);
 }

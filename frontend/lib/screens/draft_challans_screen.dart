@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/challan.dart';
+import '../services/api_service.dart';
 import '../services/local_storage_service.dart';
 import 'view_challan_screen.dart';
 import 'challan_summary_screen.dart';
@@ -22,13 +23,84 @@ class _DraftChallansScreenState extends State<DraftChallansScreen> {
     _loadDraftChallans();
   }
 
+  static const _finalizedStatuses = {'ready', 'in_transit', 'delivered'};
+
+  /// Syncs with server and removes ended challans. Uses raw storage so challan numbers match exactly.
+  Future<int> _syncAndRemoveEnded() async {
+    // Read raw list once – use exact challan_number/challanNumber as stored
+    final rawList = await LocalStorageService.getRawDraftChallansList();
+    final dcToCheck = <String>{};
+    for (final item in rawList) {
+      final dc = LocalStorageService.getDcFromRawDraft(item);
+      if (dc != null && dc.isNotEmpty) dcToCheck.add(dc);
+    }
+    final finalizedDcNumbers = <String>{};
+    for (final dc in dcToCheck) {
+      Challan? serverChallan;
+      try {
+        serverChallan = await ApiService.getChallanByNumber(dc);
+      } catch (_) {
+        try {
+          serverChallan = await ApiService.getChallanByNumber(dc.toUpperCase());
+        } catch (_) {}
+      }
+      if (serverChallan != null) {
+        final status = (serverChallan.status).toLowerCase();
+        if (_finalizedStatuses.contains(status)) {
+          final serverDc = LocalStorageService.extractDcPart(serverChallan.challanNumber) ?? serverChallan.challanNumber;
+          if (serverDc.isNotEmpty) finalizedDcNumbers.add(serverDc.toUpperCase());
+        }
+      }
+    }
+    // Remove using the same raw list so we persist the filtered list
+    if (finalizedDcNumbers.isNotEmpty) {
+      await LocalStorageService.removeDraftChallansByDcNumbers(finalizedDcNumbers, rawList);
+    }
+    return finalizedDcNumbers.length;
+  }
+
   Future<void> _loadDraftChallans() async {
     setState(() => _isLoading = true);
     try {
-      final drafts = await LocalStorageService.getDraftChallans();
+      // Use raw list so we send exact stored challan numbers to API and remove with same data
+      final rawList = await LocalStorageService.getRawDraftChallansList();
+      final dcToCheck = <String>{};
+      for (final item in rawList) {
+        final dc = LocalStorageService.getDcFromRawDraft(item);
+        if (dc != null && dc.isNotEmpty) dcToCheck.add(dc);
+      }
+      final finalizedDcNumbers = <String>{};
+      for (final dc in dcToCheck) {
+        Challan? serverChallan;
+        try {
+          serverChallan = await ApiService.getChallanByNumber(dc);
+        } catch (_) {
+          try {
+            serverChallan = await ApiService.getChallanByNumber(dc.toUpperCase());
+          } catch (_) {}
+        }
+        if (serverChallan != null) {
+          final status = (serverChallan.status).toLowerCase();
+          if (_finalizedStatuses.contains(status)) {
+            final serverDc = LocalStorageService.extractDcPart(serverChallan.challanNumber) ?? serverChallan.challanNumber;
+            if (serverDc.isNotEmpty) finalizedDcNumbers.add(serverDc.toUpperCase());
+          }
+        }
+      }
+      if (finalizedDcNumbers.isNotEmpty) {
+        await LocalStorageService.removeDraftChallansByDcNumbers(finalizedDcNumbers, rawList);
+      }
+      if (!mounted) return;
+      List<Challan> updated = await LocalStorageService.getDraftChallans();
+      if (finalizedDcNumbers.isNotEmpty) {
+        updated = updated.where((c) {
+          final dc = LocalStorageService.extractDcPart(c.challanNumber);
+          return dc == null || dc.isEmpty || !finalizedDcNumbers.contains(dc.toUpperCase());
+        }).toList();
+      }
       if (!mounted) return;
       setState(() {
-        _draftChallans = drafts;
+        _draftChallans = updated;
         _isLoading = false;
       });
     } catch (e) {
@@ -65,12 +137,34 @@ class _DraftChallansScreenState extends State<DraftChallansScreen> {
       ),
     );
 
-    if (confirmed == true) {
-      if (challan.challanNumber != null) {
+    if (confirmed != true) return;
+
+    try {
+      // Delete on server if this draft has a challan id (so it can be reused for another challan)
+      if (challan.id != null) {
+        try {
+          await ApiService.deleteChallan(challan.id!);
+        } catch (_) {
+          // Still remove from local list if server delete fails (e.g. offline)
+        }
+      }
+      // Remove from local storage (by DC so it disappears from Old Challans and is not re-added)
+      final dc = LocalStorageService.extractDcPart(challan.challanNumber) ?? challan.challanNumber;
+      if (dc.isNotEmpty) {
+        await LocalStorageService.removeDraftChallansByDcNumber(dc);
+      } else {
         await LocalStorageService.removeDraftChallan(challan.challanNumber);
       }
-      _loadDraftChallans();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error deleting draft: $e'),
+          backgroundColor: Colors.red.shade600,
+        ),
+      );
     }
+    if (mounted) _loadDraftChallans();
   }
 
   Future<void> _continueDraftChallan(Challan challan) async {
@@ -85,6 +179,7 @@ class _DraftChallansScreenState extends State<DraftChallansScreen> {
           priceCategory: challan.priceCategory,
           items: challan.items,
           challanNumber: challan.challanNumber,
+          challanId: challan.id, // So "End Challan" updates existing instead of creating new
         ),
       ),
     );
@@ -112,6 +207,90 @@ class _DraftChallansScreenState extends State<DraftChallansScreen> {
           ),
         ),
         centerTitle: false,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.sync, color: Color(0xFF1A1A1A)),
+            onPressed: () async {
+              if (_isLoading) return;
+              setState(() => _isLoading = true);
+              try {
+                final removed = await _syncAndRemoveEnded();
+                if (!mounted) return;
+                await _loadDraftChallans();
+                if (!mounted) return;
+                setState(() => _isLoading = false);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(removed > 0
+                        ? 'Removed $removed ended challan(s) from drafts.'
+                        : 'Synced. No ended challans in your drafts.'),
+                    backgroundColor: const Color(0xFF10B981),
+                  ),
+                );
+              } catch (e) {
+                if (mounted) {
+                  setState(() => _isLoading = false);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Sync failed: $e'),
+                      backgroundColor: Colors.red.shade600,
+                    ),
+                  );
+                }
+              }
+            },
+            tooltip: 'Sync & remove ended challans',
+          ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Color(0xFF1A1A1A)),
+            onSelected: (value) async {
+              if (value == 'clear_all') {
+                final confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Clear all drafts?'),
+                    content: const Text(
+                      'This will remove all draft challans from this device. '
+                      'Challans already ended on server are not affected. Cannot be undone.',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: const Text('Cancel'),
+                      ),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade600),
+                        onPressed: () => Navigator.pop(ctx, true),
+                        child: const Text('Clear all'),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirmed == true) {
+                  await LocalStorageService.clearAllDraftChallans();
+                  if (mounted) _loadDraftChallans();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('All draft challans cleared.'),
+                        backgroundColor: Color(0xFF10B981),
+                      ),
+                    );
+                  }
+                }
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'clear_all',
+                child: ListTile(
+                  leading: Icon(Icons.delete_sweep, color: Colors.red),
+                  title: Text('Clear all draft challans'),
+                ),
+              ),
+            ],
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
           child: Container(

@@ -1,5 +1,5 @@
-name: Decojewel
-description: Decojewel mobile application
+name: decojewels
+description: DecoJewels mobile application
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -25,6 +25,18 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+# App launcher icon - use a SQUARE image (e.g. 1024x1024) to avoid stretch on home screen
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/menu-logo.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/images/menu-logo.png"
+  adaptive_icon_foreground_inset: 22  # More padding so logo is centered and not stretched at edges
+  min_sdk_android: 29  # Android 10 (API 29) or higher
+  remove_alpha_ios: true  # Required for App Store (no transparent app icons)
 
 flutter:
   uses-material-design: true

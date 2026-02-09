@@ -1,4 +1,4 @@
--- Update or create professional Orders Table for Delhi Jewel
+-- Update or create professional Orders Table for DecoJewel
 -- This script will add missing columns if table exists, or create new table
 
 -- Check if table exists and create/update accordingly

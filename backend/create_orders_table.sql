@@ -1,4 +1,4 @@
--- Professional Orders Table for Delhi Jewel
+-- Professional Orders Table for DecoJewel
 -- This table stores order information linked to product_catalog
 
 CREATE TABLE IF NOT EXISTS orders (

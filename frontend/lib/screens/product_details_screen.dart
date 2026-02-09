@@ -514,21 +514,21 @@ class ProductDetailsScreen extends StatelessWidget {
       metaItems.add({
         'label': 'External ID',
         'value': '${product.externalId}',
-        'icon': Icons.confirmation_number_outlined.codePoint
+        'icon': Icons.confirmation_number_outlined  // Store IconData directly instead of codePoint
       });
     }
     if (product.categoryName != null) {
       metaItems.add({
         'label': 'Category',
         'value': product.categoryName!,
-        'icon': Icons.category_outlined.codePoint
+        'icon': Icons.category_outlined  // Store IconData directly instead of codePoint
       });
     }
     if (product.qrCode != null) {
       metaItems.add({
         'label': 'QR Code Reference',
         'value': product.qrCode!,
-        'icon': Icons.qr_code_2_outlined.codePoint
+        'icon': Icons.qr_code_2_outlined  // Store IconData directly instead of codePoint
       });
     }
 
@@ -576,10 +576,8 @@ class ProductDetailsScreen extends StatelessWidget {
           ...metaItems.asMap().entries.map((entry) {
             final index = entry.key;
             final item = entry.value;
-            final iconData = IconData(
-              item['icon'] as int,
-              fontFamily: 'MaterialIcons',
-            );
+            // Use IconData directly from the map (already stored as IconData, not codePoint)
+            final iconData = item['icon'] as IconData;
             return Column(
               children: [
                 _buildMetaRow(
@@ -708,6 +706,8 @@ class ProductDetailsScreen extends StatelessWidget {
                 width: 200,
                 height: 200,
                 fit: BoxFit.contain,
+                cacheWidth: 400,
+                cacheHeight: 400,
                 loadingBuilder: (context, child, loadingProgress) {
                   if (loadingProgress == null) return child;
                   return Container(

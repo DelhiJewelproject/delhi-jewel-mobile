@@ -21,7 +21,6 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
   final TextEditingController _transportController = TextEditingController();
   final TextEditingController _priceCategoryController =
       TextEditingController();
-
   List<String> _partyOptions = [];
   List<String> _stationOptions = [];
   List<String> _transportOptions = [];
@@ -56,68 +55,47 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
     setState(() => _isLoadingPartyData = true);
 
     try {
-      // Get station and price_category from orders table
-      final orderData = await ApiService.getPartyDataFromOrders(partyName.trim());
-      
-      // Get transport name from challan table (if available)
-      Challan? matchingChallan;
-      try {
-        final challans = await ApiService.getChallans(
-          search: partyName.trim(),
-          limit: 10,
-        );
-
-        // Find the most recent challan with exact party name match
-        for (var challan in challans) {
-          if (challan.partyName.trim().toLowerCase() ==
-              partyName.trim().toLowerCase()) {
-            matchingChallan = challan;
-            break; // Get the first one (most recent due to ordering)
-          }
-        }
-      } catch (e) {
-        // Silently fail for challan lookup - not critical
-        if (kDebugMode) {
-          print('Error loading challan data: $e');
-        }
-      }
-
+      // Single API call - returns station, transport, price_category from challans + orders
+      final partyData = await ApiService.getPartyDataFromOrders(partyName.trim());
       if (!mounted) return;
+      if (partyData == null) return;
 
       bool hasChanges = false;
 
-      // Auto-fill station from orders table (always update when party changes)
-      if (orderData != null && 
-          orderData['station'] != null && 
-          orderData['station']!.toString().trim().isNotEmpty) {
-        final newStation = orderData['station']!.toString().trim();
+      // Auto-fill station
+      if (partyData['station'] != null &&
+          partyData['station']!.toString().trim().isNotEmpty) {
+        final newStation = partyData['station']!.toString().trim();
         if (_stationController.text != newStation) {
           _stationController.text = newStation;
           hasChanges = true;
         }
       }
 
-      // Auto-fill price category from orders table (always update when party changes)
-      if (orderData != null && 
-          orderData['price_category'] != null && 
-          orderData['price_category']!.toString().trim().isNotEmpty) {
-        final newPriceCategory = orderData['price_category']!.toString().trim();
+      // Auto-fill price category
+      if (partyData['price_category'] != null &&
+          partyData['price_category']!.toString().trim().isNotEmpty) {
+        final newPriceCategory = partyData['price_category']!.toString().trim();
         if (_priceCategoryController.text != newPriceCategory) {
           _priceCategoryController.text = newPriceCategory;
           hasChanges = true;
         }
       }
 
-      // Set transport name: default to "By Road", or use from challan if available (always update when party changes)
-      String newTransport = 'By Road';
-      if (matchingChallan != null &&
-          matchingChallan.transportName != null &&
-          matchingChallan.transportName!.isNotEmpty) {
-        newTransport = matchingChallan.transportName!;
-      }
-      if (_transportController.text != newTransport) {
-        _transportController.text = newTransport;
-        hasChanges = true;
+      // Auto-fill transport: only if party data has transport_name, otherwise leave blank
+      if (partyData['transport_name'] != null &&
+          partyData['transport_name']!.toString().trim().isNotEmpty) {
+        final newTransport = partyData['transport_name']!.toString().trim();
+        if (_transportController.text != newTransport) {
+          _transportController.text = newTransport;
+          hasChanges = true;
+        }
+      } else {
+        // If transport_name is null/empty, clear the field (don't default to "By Road")
+        if (_transportController.text.isNotEmpty) {
+          _transportController.clear();
+          hasChanges = true;
+        }
       }
 
       if (hasChanges) {
@@ -159,7 +137,7 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
       _errorMessage = null;
     });
     try {
-      final options = await ApiService.getChallanOptions();
+      final options = await ApiService.getChallanOptions(quick: false);
       if (!mounted) return;
 
       // Remove duplicates and normalize data
@@ -196,6 +174,7 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
       partyNames.sort();
       stationNames.sort();
 
+      if (!mounted) return;
       setState(() {
         _partyOptions = partyNames;
         _stationOptions = stationNames;
@@ -212,6 +191,7 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
             .toList()
           ..sort();
         _isLoadingOptions = false;
+        _errorMessage = null;
       });
     } catch (e) {
       if (!mounted) return;
@@ -219,19 +199,13 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
         _isLoadingOptions = false;
         _errorMessage = 'Unable to load options. Please check your connection.';
       });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Unable to load options: ${e.toString().split(':').last}'),
-            backgroundColor: Colors.red.shade600,
-            duration: const Duration(seconds: 4),
-            action: SnackBarAction(
-              label: 'Retry',
-              textColor: Colors.white,
-              onPressed: _loadOptions,
-            ),
-          ),
-        );
+      // Error is shown in the top banner; no SnackBar to avoid duplicate messages.
+    } finally {
+      if (mounted && _isLoadingOptions) {
+        setState(() {
+          _isLoadingOptions = false;
+          if (_partyOptions.isEmpty) _errorMessage = 'Unable to load options. Please check your connection.';
+        });
       }
     }
   }
@@ -244,40 +218,61 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
     final partyName = _partyController.text.trim();
     final stationName = _stationController.text.trim();
     final transportName = _transportController.text.trim();
-    final priceCategory = _priceCategoryController.text.trim().isEmpty
-        ? null
-        : _priceCategoryController.text.trim();
+    // Price category is now mandatory, so we always use the trimmed value
+    final priceCategory = _priceCategoryController.text.trim();
 
-    // Create challan immediately after party details are entered
     setState(() => _isLoadingOptions = true);
     try {
-      final challanData = {
-        'party_name': partyName,
-        'station_name': stationName,
-        'transport_name': transportName,
-        'price_category': priceCategory,
-        'status': 'draft',
-        'items': [], // No items yet, will be added later
-      };
+      Challan challan;
 
-      final challan = await ApiService.createChallan(challanData);
-      
-    if (!mounted) return;
-      
-      // Navigate with the created challan
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => ChallanSelectionScanScreen(
-          partyName: partyName,
-          stationName: stationName,
-          transportName: transportName,
-          priceCategory: priceCategory,
+      // Reuse an existing empty draft challan (no products) instead of creating a new one
+      final emptyDrafts = await ApiService.getEmptyDraftChallans(limit: 10);
+      if (emptyDrafts.isNotEmpty) {
+        // Prefer one for the same party, otherwise use the first (most recently updated)
+        Challan? sameParty;
+        for (final c in emptyDrafts) {
+          if ((c.partyName ?? '').trim().toLowerCase() == partyName.toLowerCase()) {
+            sameParty = c;
+            break;
+          }
+        }
+        final toReuse = sameParty ?? emptyDrafts.first;
+        final updatePayload = {
+          'party_name': partyName,
+          'station_name': stationName,
+          'transport_name': transportName,
+          'price_category': priceCategory,
+          'status': 'draft',
+          'items': <Map<String, dynamic>>[],
+        };
+        challan = await ApiService.updateChallan(toReuse.id!, updatePayload);
+      } else {
+        final challanData = {
+          'party_name': partyName,
+          'station_name': stationName,
+          'transport_name': transportName,
+          'price_category': priceCategory,
+          'status': 'draft',
+          'items': <Map<String, dynamic>>[],
+        };
+        challan = await ApiService.createChallan(challanData);
+      }
+
+      if (!mounted) return;
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => ChallanSelectionScanScreen(
+            partyName: partyName,
+            stationName: stationName,
+            transportName: transportName,
+            priceCategory: priceCategory,
             challanId: challan.id,
             challanNumber: challan.challanNumber,
+          ),
         ),
-      ),
-    );
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoadingOptions = false);
@@ -308,6 +303,7 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
     required List<String> options,
     required String? Function(String?) validator,
     bool isRequired = true,
+    FocusNode? focusNode,
   }) {
     return Container(
       margin: EdgeInsets.only(bottom: isMobile ? 16 : 20),
@@ -346,10 +342,10 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
           SizedBox(height: isMobile ? 8 : 10),
           TypeAheadField<String>(
             controller: controller,
-            builder: (context, textController, focusNode) {
+            builder: (context, textController, typeAheadFocusNode) {
               return TextFormField(
                 controller: textController,
-                focusNode: focusNode,
+                focusNode: focusNode ?? typeAheadFocusNode,
                 decoration: InputDecoration(
                   hintText: hint,
                   hintStyle: TextStyle(
@@ -360,7 +356,8 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
                   fillColor: Colors.white,
                   contentPadding: EdgeInsets.symmetric(
                     horizontal: isMobile ? 14 : 16,
-                    vertical: isMobile ? 14 : 16,
+                    // Reduce vertical padding so dropdown items are more compact
+                    vertical: isMobile ? 10 : 12,
                   ),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(isMobile ? 10 : 12),
@@ -479,7 +476,8 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
                 child: ListTile(
                   contentPadding: EdgeInsets.symmetric(
                     horizontal: isMobile ? 12 : 16,
-                    vertical: isMobile ? 10 : 12,
+                    // Reduce vertical padding to decrease extra space in dropdown
+                    vertical: isMobile ? 6 : 8,
                   ),
                   leading: Container(
                     padding: EdgeInsets.all(isMobile ? 5 : 6),
@@ -520,7 +518,9 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
             hideOnEmpty: false,
             hideOnError: false,
             hideOnLoading: false,
+            showOnFocus: true,
             debounceDuration: const Duration(milliseconds: 300),
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.4),
           ),
         ],
       ),
@@ -635,7 +635,7 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
                   ),
                   _buildFormField(
                     label: 'Price Category',
-                    hint: 'Select price category (optional)',
+                    hint: 'Select price category',
                     icon: Icons.currency_rupee,
                     controller: _priceCategoryController,
                     options: _priceCategories,
@@ -799,12 +799,17 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
                       ),
                       _buildFormField(
                         label: 'Price Category',
-                        hint: 'Select price category (optional)',
+                        hint: 'Select price category',
                         icon: Icons.currency_rupee,
                         controller: _priceCategoryController,
                         options: _priceCategories,
-                        validator: (value) => null,
-                        isRequired: false,
+                        validator: (value) {
+                          if (value == null || value.trim().isEmpty) {
+                            return 'Please select a price category';
+                          }
+                          return null;
+                        },
+                        isRequired: true,
                       ),
                     ],
                   ),
@@ -1005,17 +1010,67 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
                         ),
                         _buildFormField(
                           label: 'Price Category',
-                          hint: 'Select price category (optional)',
+                          hint: 'Select price category',
                           icon: Icons.currency_rupee,
                           controller: _priceCategoryController,
                           options: _priceCategories,
-                          validator: (value) => null,
-                          isRequired: false,
+                          validator: (value) {
+                            if (value == null || value.trim().isEmpty) {
+                              return 'Please select a price category';
+                            }
+                            return null;
+                          },
+                          isRequired: true,
                         ),
                       ],
                     ),
                   ),
                 ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOptionsErrorBanner() {
+    return Material(
+      color: Colors.red.shade600,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: isMobile ? 16 : 24,
+            vertical: 10,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Unable to load options. Check Wi‑Fi and server, then tap Retry. You can still enter party, station, and transport manually.',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              TextButton(
+                onPressed: () {
+                  setState(() => _errorMessage = null);
+                  _loadOptions();
+                },
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                ),
+                child: const Text('Retry'),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close, color: Colors.white, size: 20),
+                onPressed: () => setState(() => _errorMessage = null),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               ),
             ],
           ),
@@ -1146,60 +1201,19 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
                 ],
               ),
             )
-          : _errorMessage != null && _partyOptions.isEmpty
-              ? Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(isMobile ? 20 : 24),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.error_outline,
-                          size: isMobile ? 48 : 64,
-                          color: const Color(0xFFFFCDD2),
-                        ),
-                        SizedBox(height: isMobile ? 16 : 20),
-                        Text(
-                          _errorMessage!,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: isMobile ? 14 : 16,
-                            color: Colors.grey.shade700,
-                          ),
-                        ),
-                        SizedBox(height: isMobile ? 20 : 24),
-                        ElevatedButton.icon(
-                          onPressed: _loadOptions,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Retry'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFFB8860B),
-                            foregroundColor: Colors.white,
-                            padding: EdgeInsets.symmetric(
-                              horizontal: isMobile ? 20 : 24,
-                              vertical: isMobile ? 10 : 12,
-                            ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              : Column(
-                  children: [
-                    Expanded(
-                      child: isMobile
-                          ? _buildMobileLayout()
-                          : isTablet
-                              ? _buildTabletLayout()
-                              : _buildDesktopLayout(),
-                    ),
-                    _buildSubmitButton(),
-                  ],
+          : Column(
+              children: [
+                if (_errorMessage != null) _buildOptionsErrorBanner(),
+                Expanded(
+                  child: isMobile
+                      ? _buildMobileLayout()
+                      : isTablet
+                          ? _buildTabletLayout()
+                          : _buildDesktopLayout(),
                 ),
+                _buildSubmitButton(),
+              ],
+            ),
     );
   }
 }

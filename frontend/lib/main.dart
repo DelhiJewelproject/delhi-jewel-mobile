@@ -17,10 +17,11 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Deco Jewel',
+      title: 'DecoJewels',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
         brightness: Brightness.dark,
         colorScheme: ColorScheme.dark(
           primary: const Color(0xFFD4AF37), // Gold

@@ -5,8 +5,13 @@ import '../models/product.dart';
 import '../models/challan.dart';
 
 class ApiService {
-  // Backend API base URL - EC2 instance
-  static const String baseUrl = 'http://65.1.12.120:9010';
+  /// Backend API base URL. Frontend runs locally; API points to remote server by default.
+  /// Override for local backend: flutter run --dart-define=API_BASE_URL=http://10.0.2.2:9010
+  static String get baseUrl =>
+      const String.fromEnvironment(
+        'API_BASE_URL',
+        defaultValue: 'http://13.202.81.19:9010',
+      );
 
   static Future<Product> getProductByBarcode(String barcode) async {
     try {
@@ -86,7 +91,18 @@ class ApiService {
     }
   }
 
+  /// In-memory cache for product catalog to avoid repeated slow loads in the same flow.
+  static List<Product>? _productsCache;
+  static DateTime? _productsCacheTime;
+  static const _productsCacheValidDuration = Duration(minutes: 2);
+
   static Future<List<Product>> getAllProducts() async {
+    final now = DateTime.now();
+    if (_productsCache != null &&
+        _productsCacheTime != null &&
+        now.difference(_productsCacheTime!) < _productsCacheValidDuration) {
+      return _productsCache!;
+    }
     try {
       final response = await http.get(
         Uri.parse('$baseUrl/api/v1/products-master/'), // Using products_master endpoint
@@ -101,20 +117,25 @@ class ApiService {
 
       if (response.statusCode == 200) {
         final List<dynamic> jsonData = json.decode(response.body);
-        return jsonData.map((json) {
+        final list = jsonData.map((json) {
           try {
             return Product.fromJson(json);
           } catch (e) {
-            print('Error parsing product: $e');
-            print('Product data: $json');
+            if (kDebugMode) {
+              print('Error parsing product: $e');
+              print('Product data: $json');
+            }
             rethrow;
           }
         }).toList();
+        _productsCache = list;
+        _productsCacheTime = DateTime.now();
+        return list;
       } else {
         throw Exception('Failed to load products: ${response.statusCode}');
       }
     } catch (e) {
-      print('API Error: $e');
+      if (kDebugMode) print('API Error: $e');
       if (e.toString().contains('timeout') ||
           e.toString().contains('Connection timed out')) {
         throw Exception(
@@ -320,21 +341,40 @@ class ApiService {
     }
   }
 
-  static Future<Map<String, dynamic>> getChallanOptions() async {
-    try {
-      final response = await http.get(
-        Uri.parse('$baseUrl/api/challan/options'),
-        headers: {'Content-Type': 'application/json'},
-      ).timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        return json.decode(response.body) as Map<String, dynamic>;
-      } else {
-        throw Exception('Failed to load challan options');
-      }
-    } catch (e) {
-      throw Exception('Unable to fetch challan options: $e');
+  static Future<Map<String, dynamic>> _getChallanOptionsOnce({bool quick = false}) async {
+    final uri = quick
+        ? Uri.parse('$baseUrl/api/challan/options?quick=true')
+        : Uri.parse('$baseUrl/api/challan/options');
+    final response = await http.get(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+    ).timeout(
+      const Duration(seconds: 60),
+      onTimeout: () => throw Exception('Connection timeout'),
+    );
+    if (response.statusCode == 200) {
+      return json.decode(response.body) as Map<String, dynamic>;
     }
+    throw Exception('Server error ${response.statusCode}');
+  }
+
+  /// Load challan options. Use quick=true for challan form (faster, challans only).
+  static Future<Map<String, dynamic>> getChallanOptions({bool quick = false}) async {
+    Object? lastError;
+    for (var attempt = 1; attempt <= 4; attempt++) {
+      try {
+        return await _getChallanOptionsOnce(quick: quick);
+      } catch (e) {
+        lastError = e;
+        if (attempt == 4) break;
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+    }
+    final msg = lastError.toString();
+    if (msg.contains('Timeout') || msg.contains('timeout') || msg.contains('Future') || msg.contains('Socket') || msg.contains('Connection') || msg.contains('Failed host')) {
+      throw Exception('Cannot reach server. Check Wi‑Fi and that the server is on, then tap Retry.');
+    }
+    throw Exception('Unable to load options. Tap Retry or check your connection.');
   }
 
   static Future<Challan> createChallan(Map<String, dynamic> challanData) async {
@@ -363,6 +403,20 @@ class ApiService {
     } catch (e) {
       if (e.toString().contains('Exception:')) rethrow;
       throw Exception('Error creating challan: $e');
+    }
+  }
+
+  /// Delete a challan on the server (draft or otherwise). Use when user deletes a draft from Old Challans.
+  static Future<void> deleteChallan(int challanId) async {
+    final response = await http.delete(
+      Uri.parse('$baseUrl/api/challans/$challanId'),
+      headers: {'Content-Type': 'application/json'},
+    ).timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200 && response.statusCode != 204) {
+      final body = response.body;
+      throw Exception(
+        body.isNotEmpty ? body : 'Failed to delete challan (${response.statusCode})',
+      );
     }
   }
 
@@ -400,37 +454,67 @@ class ApiService {
     String? search,
     int limit = 50,
   }) async {
-    try {
-      final queryParameters = <String, String>{
-        'limit': limit.toString(),
-      };
-      if (status != null && status.isNotEmpty) {
-        queryParameters['status'] = status;
-      }
-      if (search != null && search.isNotEmpty) {
-        queryParameters['search'] = search;
-      }
-
-      final uri = Uri.parse('$baseUrl/api/challans')
-          .replace(queryParameters: queryParameters);
-      final response = await http.get(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-      ).timeout(const Duration(seconds: 15));
-
-      if (response.statusCode == 200) {
-        final jsonData = json.decode(response.body) as Map<String, dynamic>;
-        final List<dynamic> challansJson =
-            jsonData['challans'] as List<dynamic>? ?? [];
-        return challansJson
-            .map((c) => Challan.fromJson(c as Map<String, dynamic>))
-            .toList();
-      } else {
-        throw Exception('Failed to load challans (${response.statusCode})');
-      }
-    } catch (e) {
-      throw Exception('Error fetching challans: $e');
+    final queryParameters = <String, String>{
+      'limit': limit.toString(),
+    };
+    if (status != null && status.isNotEmpty) {
+      queryParameters['status'] = status;
     }
+    if (search != null && search.isNotEmpty) {
+      queryParameters['search'] = search;
+    }
+    final uri = Uri.parse('$baseUrl/api/challans')
+        .replace(queryParameters: queryParameters);
+
+    Object? lastError;
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      try {
+        final response = await http.get(
+          uri,
+          headers: {'Content-Type': 'application/json'},
+        ).timeout(const Duration(seconds: 90));
+
+        if (response.statusCode == 200) {
+          final jsonData = json.decode(response.body) as Map<String, dynamic>;
+          final List<dynamic> challansJson =
+              jsonData['challans'] as List<dynamic>? ?? [];
+          return challansJson
+              .map((c) => Challan.fromJson(c as Map<String, dynamic>))
+              .toList();
+        } else {
+          throw Exception('Failed to load challans (${response.statusCode})');
+        }
+      } catch (e) {
+        lastError = e;
+        if (attempt == 3) {
+          throw Exception(
+            e.toString().contains('Timeout') || e.toString().contains('timeout')
+                ? 'Server took too long. Tap Retry or check your connection.'
+                : 'Error fetching challans: $e',
+          );
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+    }
+    throw Exception('Error fetching challans: $lastError');
+  }
+
+  /// Draft challans with zero items. Used to reuse one instead of creating a new challan.
+  static Future<List<Challan>> getEmptyDraftChallans({int limit = 10}) async {
+    final uri = Uri.parse('$baseUrl/api/challans/empty-drafts')
+        .replace(queryParameters: {'limit': limit.toString()});
+    final response = await http.get(
+      uri,
+      headers: {'Content-Type': 'application/json'},
+    ).timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) {
+      return [];
+    }
+    final jsonData = json.decode(response.body) as Map<String, dynamic>?;
+    final List<dynamic> list = jsonData?['challans'] as List<dynamic>? ?? [];
+    return list
+        .map((c) => Challan.fromJson(c as Map<String, dynamic>))
+        .toList();
   }
 
   static Future<Challan> getChallanById(int challanId) async {
@@ -483,40 +567,40 @@ class ApiService {
   }
 
   static Future<Map<String, String?>?> getPartyDataFromOrders(String partyName) async {
-    try {
-      final response = await http.get(
-        Uri.parse(
-            '$baseUrl/api/orders/party-data/${Uri.encodeComponent(partyName)}'),
-        headers: {'Content-Type': 'application/json'},
-      ).timeout(const Duration(seconds: 10));
+    if (partyName.trim().isEmpty) return null;
+    final encoded = Uri.encodeComponent(partyName.trim());
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        final response = await http.get(
+          Uri.parse('$baseUrl/api/orders/party-data?party_name=$encoded'),
+          headers: {'Content-Type': 'application/json'},
+        ).timeout(const Duration(seconds: 25));
 
-      if (response.statusCode == 200) {
-        final jsonData = json.decode(response.body) as Map<String, dynamic>;
-        // Handle null values and convert to String if needed
-        String? station = jsonData['station']?.toString();
-        String? phoneNumber = jsonData['phone_number']?.toString();
-        String? priceCategory = jsonData['price_category']?.toString();
-        String? transportName = jsonData['transport_name']?.toString();
-        
-        return {
-          'station': (station != null && station.isNotEmpty) ? station : null,
-          'phone_number': (phoneNumber != null && phoneNumber.isNotEmpty) ? phoneNumber : null,
-          'price_category': (priceCategory != null && priceCategory.isNotEmpty) ? priceCategory : null,
-          'transport_name': (transportName != null && transportName.isNotEmpty) ? transportName : null,
-        };
-      } else if (response.statusCode == 404) {
-        if (kDebugMode) {
-          print('No party data found for: $partyName');
+        if (response.statusCode == 200) {
+          final jsonData = json.decode(response.body) as Map<String, dynamic>;
+          String? station = jsonData['station']?.toString();
+          String? phoneNumber = jsonData['phone_number']?.toString();
+          String? priceCategory = jsonData['price_category']?.toString();
+          String? transportName = jsonData['transport_name']?.toString();
+          return {
+            'station': (station != null && station.isNotEmpty) ? station : null,
+            'phone_number': (phoneNumber != null && phoneNumber.isNotEmpty) ? phoneNumber : null,
+            'price_category': (priceCategory != null && priceCategory.isNotEmpty) ? priceCategory : null,
+            'transport_name': (transportName != null && transportName.isNotEmpty) ? transportName : null,
+          };
+        } else if (response.statusCode == 404) {
+          return null;
+        } else {
+          throw Exception('Failed to load party data (${response.statusCode})');
         }
-        return null; // No data found
-      } else {
-        throw Exception('Failed to load party data (${response.statusCode})');
+      } catch (e) {
+        if (attempt == 2) {
+          if (kDebugMode) print('Error fetching party data: $e');
+          return null;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 400));
       }
-    } catch (e) {
-      if (kDebugMode) {
-        print('Error fetching party data from orders: $e');
-      }
-      return null; // Return null on error instead of throwing
     }
+    return null;
   }
 }

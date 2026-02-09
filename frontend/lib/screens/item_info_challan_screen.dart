@@ -43,7 +43,9 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
   List<Product> _catalog = [];
   bool _isLoadingCatalog = false;
   bool _isSubmitting = false;
-  final Map<int, TextEditingController> _quantityControllers = {};
+  // Key = _getItemKey(item) so we can edit both stored and new items
+  final Map<String, TextEditingController> _quantityControllers = {};
+  final Map<String, FocusNode> _quantityFocusNodes = {};
   String? _draftChallanNumber;
 
   @override
@@ -56,14 +58,53 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
     }
     // Merge stored items with current items
     _mergeStoredItems();
+    
+    // Note: We keep stored items' quantities intact (they're preserved)
+    // Items in _items that match stored items will show empty in the input field
+    // but the stored quantity will be added when OK is clicked
+    
     // Use provided draft challan number or find existing one or create new
     _draftChallanNumber = widget.draftChallanNumber;
     _initializeDraftChallanNumber();
-    // Initialize quantity controllers for existing items
-    for (var i = 0; i < _items.length; i++) {
-      _quantityControllers[i] = TextEditingController(
-        text: _items[i].quantity > 0 ? _items[i].quantity.toStringAsFixed(2) : '',
-      );
+    // Initialize quantity controllers for all items shown in table (stored + new)
+    // IMPORTANT: Items from _items that match stored items should show EMPTY, not the stored quantity
+    final storedKeysForControllers = _storedItems.map((item) => _getItemKey(item)).toSet();
+    final itemKeys = _items.map((item) => _getItemKey(item)).toSet();
+    
+    // For stored items: show their quantities ONLY if they don't match any item in _items
+    // (If they match, the item from _items will be shown with empty quantity instead)
+    for (var item in _storedItems) {
+      final key = _getItemKey(item);
+      // Only create controller for stored items that DON'T match items in _items
+      if (!itemKeys.contains(key) && !_quantityControllers.containsKey(key)) {
+        _quantityControllers[key] = TextEditingController(
+          text: item.quantity > 0 ? item.quantity.toStringAsFixed(2) : '',
+        );
+        _quantityFocusNodes[key] = FocusNode();
+      }
+    }
+    
+    // For new items (_items): if same product/size exists in stored items, start EMPTY (don't pre-fill)
+    // Otherwise, show their quantity (usually 0 for new items)
+    for (var item in _items) {
+      final key = _getItemKey(item);
+      final isSameAsStored = storedKeysForControllers.contains(key);
+      
+      // Always create/override controller for items in _items
+      // If it matches a stored item, set to empty (user can add more)
+      // Otherwise, use the item's quantity
+      if (_quantityControllers.containsKey(key)) {
+        // Controller exists (maybe from stored item) - override to empty if matches stored item
+        if (isSameAsStored) {
+          _quantityControllers[key]!.text = '';
+        }
+      } else {
+        // Create new controller - empty if matches stored item, otherwise use item's quantity
+        _quantityControllers[key] = TextEditingController(
+          text: isSameAsStored ? '' : (item.quantity > 0 ? item.quantity.toStringAsFixed(2) : ''),
+        );
+        _quantityFocusNodes[key] = FocusNode();
+      }
     }
     _loadCatalog();
   }
@@ -126,20 +167,83 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
     return _items.where((item) => !storedKeys.contains(_getItemKey(item))).toList();
   }
   
-  // Get previous items (stored items)
+  // Get previous items (stored items) – shown in table with new items
   List<ChallanItem> get _previousItems => _storedItems;
 
-  // Don't merge stored items with current items - keep them separate
-  // Stored items are preserved but not shown in the table (only new items are shown)
+  // All items (stored + new) for totals and submit
+  List<ChallanItem> get _allDisplayItems => [..._previousItems, ..._newItems];
+
+  // Product names currently in the new-items batch (for same-product filter)
+  // Use _items directly to get all product names, not just _newItems
+  Set<String> get _newItemsProductNames {
+    final names = <String>{};
+    for (final item in _items) {
+      final n = item.productName.trim();
+      if (n.isNotEmpty) names.add(n);
+    }
+    return names;
+  }
+
+  // Stored items that belong to the same product(s) as the current new items only
+  List<ChallanItem> get _storedItemsSameProduct {
+    if (_newItemsProductNames.isEmpty) return [];
+    return _storedItems
+        .where((s) => _newItemsProductNames.contains(s.productName.trim()))
+        .toList();
+  }
+
+  // Table shows only same-product list: previous selected items for current product(s) + new items (no other products)
+  // BUT: if a stored item matches an item in _items (same product+size), exclude the stored item so user can enter fresh quantity
+  // Use _items directly (not _newItems) so all items are visible, but exclude stored items that match
+  // Also: hide any rows whose price is 0 or less (don't show zero-price sizes in the table)
+  List<ChallanItem> get _tableDisplayItems {
+    final itemKeys = _items.map((item) => _getItemKey(item)).toSet();
+    // Only include stored items that DON'T match any item in _items (by product+size)
+    // This way, if same product+size is selected again, we show the item from _items (with empty qty) instead of stored item
+    final filteredStoredItems = _storedItemsSameProduct
+        .where((s) => !itemKeys.contains(_getItemKey(s)))
+        .toList();
+    // Use _items directly (all items from current selection) instead of _newItems
+    final combined = [...filteredStoredItems, ..._items];
+    // Filter out any items with zero or negative price from the table
+    return combined.where((item) => (item.unitPrice) > 0).toList();
+  }
+
+  // Group by product name – same-product items only (stored + new for current product(s))
+  Map<String, List<ChallanItem>> get _groupedDisplayItems {
+    final map = <String, List<ChallanItem>>{};
+    for (final item in _tableDisplayItems) {
+      final name = item.productName.trim().isEmpty ? 'Other' : item.productName;
+      map.putIfAbsent(name, () => []).add(item);
+    }
+    return map;
+  }
+
+  // Flat list for ListView.builder: section headers and rows, grouped by product category
+  List<({bool isHeader, String? categoryName, ChallanItem? item, int serial, String? itemKey})> get _tableEntries {
+    final list = <({bool isHeader, String? categoryName, ChallanItem? item, int serial, String? itemKey})>[];
+    int serial = 0;
+    for (final entry in _groupedDisplayItems.entries) {
+      list.add((isHeader: true, categoryName: entry.key, item: null, serial: 0, itemKey: null));
+      for (final item in entry.value) {
+        serial++;
+        list.add((isHeader: false, categoryName: null, item: item, serial: serial, itemKey: _getItemKey(item)));
+      }
+    }
+    return list;
+  }
+
   void _mergeStoredItems() {
-    // Do nothing - keep stored items separate from _items
-    // This allows us to show only new items in the table
+    // Stored items are shown in table together with new items
   }
 
   @override
   void dispose() {
     for (var controller in _quantityControllers.values) {
       controller.dispose();
+    }
+    for (var node in _quantityFocusNodes.values) {
+      node.dispose();
     }
     super.dispose();
   }
@@ -210,10 +314,10 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
   }
 
   double get _totalAmount =>
-      _items.fold(0, (sum, item) => sum + item.totalPrice);
+      _allDisplayItems.fold(0, (sum, item) => sum + item.totalPrice);
 
   double get _totalQuantity =>
-      _items.fold(0, (sum, item) => sum + item.quantity);
+      _allDisplayItems.fold(0, (sum, item) => sum + item.quantity);
 
   String _getProductName() {
     if (_items.isEmpty) return 'Product';
@@ -305,13 +409,67 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
     });
   }
 
+  void _updateQuantityByKey(String itemKey, String value) {
+    final quantity = double.tryParse(value) ?? 0;
+    setState(() {
+      // Check if this key exists in _items (current selection)
+      // If it does, update _items only (don't update stored items)
+      // This preserves original stored quantities
+      final itemsIndex = _items.indexWhere((i) => _getItemKey(i) == itemKey);
+      if (itemsIndex >= 0) {
+        // Item exists in _items - update it (this is the current selection)
+        final item = _items[itemsIndex];
+        _items[itemsIndex] = ChallanItem(
+          id: item.id,
+          challanId: item.challanId,
+          productId: item.productId,
+          productName: item.productName,
+          sizeId: item.sizeId,
+          sizeText: item.sizeText,
+          quantity: quantity,
+          unitPrice: item.unitPrice,
+          qrCode: item.qrCode,
+        );
+      } else {
+        // Item doesn't exist in _items - check stored items
+        // Only update stored items if they're NOT in the current selection
+        final storedIndex = _storedItems.indexWhere((i) => _getItemKey(i) == itemKey);
+        if (storedIndex >= 0) {
+          final item = _storedItems[storedIndex];
+          _storedItems[storedIndex] = ChallanItem(
+            id: item.id,
+            challanId: item.challanId,
+            productId: item.productId,
+            productName: item.productName,
+            sizeId: item.sizeId,
+            sizeText: item.sizeText,
+            quantity: quantity,
+            unitPrice: item.unitPrice,
+            qrCode: item.qrCode,
+          );
+        }
+      }
+    });
+  }
+
 
   // Handle NEXT button - store current items and navigate back to add more products
   Future<void> _handleNext() async {
-    // Get only new items (not stored items) with quantity > 0
-    final newItemsWithQuantity = _newItems.where((item) => item.quantity > 0).toList();
+    // Read quantities from controllers (user's actual input) for ALL displayed items
+    // This ensures we capture what the user typed, regardless of whether it's in _storedItems or _items
+    final controllerQuantities = <String, double>{};
+    for (var entry in _quantityControllers.entries) {
+      final key = entry.key;
+      final controller = entry.value;
+      final qtyText = controller.text.trim();
+      final qty = double.tryParse(qtyText) ?? 0;
+      if (qty > 0) {
+        controllerQuantities[key] = qty;
+      }
+    }
     
-    if (newItemsWithQuantity.isEmpty) {
+    // Require at least one item with quantity > 0
+    if (controllerQuantities.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Please enter quantity greater than 0 before proceeding'),
@@ -320,35 +478,41 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
       );
       return;
     }
-    
-    // Save new items to stored items - create deep copies to avoid reference issues
-    // Also merge with existing stored items to preserve previously stored items
-    final newStoredItems = newItemsWithQuantity.map((item) => item.copyWith()).toList();
-    final existingStoredKeys = _storedItems.map((item) => _getItemKey(item)).toSet();
-    
-    // Add new items to stored items, but don't overwrite existing stored items
+
+    // Start with existing stored items (preserve them)
     final mergedStoredItems = <ChallanItem>[];
     mergedStoredItems.addAll(_storedItems);
-    
-    for (var newItem in newStoredItems) {
-      final key = _getItemKey(newItem);
-      if (!existingStoredKeys.contains(key)) {
-        mergedStoredItems.add(newItem);
-      } else {
-        // Update existing stored item with new quantity
-        final index = mergedStoredItems.indexWhere((item) => _getItemKey(item) == key);
-        if (index != -1) {
-          mergedStoredItems[index] = newItem;
-        }
+
+    // Add controller quantities as NEW separate items only when key is in _items (current product selection)
+    // This ensures each entry becomes a separate line item, even if product+size matches stored items
+    final itemKeysInCurrentSelection = _items.map((item) => _getItemKey(item)).toSet();
+    for (var entry in controllerQuantities.entries) {
+      final key = entry.key;
+      final controllerQty = entry.value;
+      final itemIndex = _items.indexWhere((i) => _getItemKey(i) == key);
+      if (itemIndex >= 0) {
+        // Key is in current product's _items – add as NEW separate item (don't update existing)
+        final item = _items[itemIndex];
+        mergedStoredItems.add(ChallanItem(
+          id: item.id,
+          challanId: item.challanId,
+          productId: item.productId,
+          productName: item.productName,
+          sizeId: item.sizeId,
+          sizeText: item.sizeText,
+          quantity: controllerQty,
+          unitPrice: item.unitPrice,
+          qrCode: item.qrCode,
+        ));
       }
+      // If key is only in stored (not in _items), skip – stored items already added above
     }
     
     setState(() {
       _storedItems = mergedStoredItems;
-      // Remove new items from _items (they are now stored, so they won't show in table)
-      final newItemKeys = newItemsWithQuantity.map((item) => _getItemKey(item)).toSet();
-      _items.removeWhere((item) => newItemKeys.contains(_getItemKey(item)));
-      // Rebuild controllers after removing items
+      // Remove items from _items that were added to stored (by key matching controller entries)
+      final addedKeys = controllerQuantities.keys.where((key) => itemKeysInCurrentSelection.contains(key)).toSet();
+      _items.removeWhere((item) => addedKeys.contains(_getItemKey(item)));
       _rebuildControllers();
     });
     
@@ -377,49 +541,91 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
     Navigator.pop(context, mergedStoredItems);
   }
   
-  // Rebuild controllers map after removing items
+  // Rebuild controllers and focus nodes: keep only for keys still in table (stored + new)
   void _rebuildControllers() {
-    final newControllers = <int, TextEditingController>{};
-    for (int i = 0; i < _items.length; i++) {
-      final oldController = _quantityControllers[i];
-      if (oldController != null) {
-        newControllers[i] = oldController;
-      } else {
-        newControllers[i] = TextEditingController(
-          text: _items[i].quantity > 0 ? _items[i].quantity.toStringAsFixed(2) : '',
+    final currentKeys = _tableDisplayItems.map((item) => _getItemKey(item)).toSet();
+    for (var key in _quantityControllers.keys.toList()) {
+      if (!currentKeys.contains(key)) {
+        _quantityControllers[key]?.dispose();
+        _quantityControllers.remove(key);
+        _quantityFocusNodes[key]?.dispose();
+        _quantityFocusNodes.remove(key);
+      }
+    }
+    for (var item in _tableDisplayItems) {
+      final key = _getItemKey(item);
+      if (!_quantityControllers.containsKey(key)) {
+        _quantityControllers[key] = TextEditingController(
+          text: item.quantity > 0 ? item.quantity.toStringAsFixed(2) : '',
         );
       }
-    }
-    // Dispose removed controllers
-    for (var entry in _quantityControllers.entries) {
-      if (!newControllers.containsKey(entry.key)) {
-        entry.value.dispose();
+      if (!_quantityFocusNodes.containsKey(key)) {
+        _quantityFocusNodes[key] = FocusNode();
       }
     }
-    _quantityControllers.clear();
-    _quantityControllers.addAll(newControllers);
   }
 
   Future<void> _handleOk() async {
-    // Get all items (including stored items)
-    final allItems = <ChallanItem>[];
-    allItems.addAll(_items);
-    
-    // Merge with stored items that aren't already in _items
-    final currentKeys = _items.map((item) => _getItemKey(item)).toSet();
-    for (var storedItem in _storedItems) {
-      final key = _getItemKey(storedItem);
-      if (!currentKeys.contains(key)) {
-        allItems.add(storedItem);
+    // Read quantities from controllers (user's actual input) for ALL displayed items
+    // This ensures we capture what the user typed, regardless of whether it's in _storedItems or _items
+    final controllerQuantities = <String, double>{};
+    for (var entry in _quantityControllers.entries) {
+      final key = entry.key;
+      final controller = entry.value;
+      final qtyText = controller.text.trim();
+      final qty = double.tryParse(qtyText) ?? 0;
+      if (qty > 0) {
+        controllerQuantities[key] = qty;
       }
+    }
+    
+    // Get all items - create SEPARATE items for each entry (don't merge)
+    // Strategy: Add stored items FIRST (oldest first), then new items from controller (so view shows serial order: 1st added 1st, 2nd added 2nd)
+    final allItems = <ChallanItem>[];
+    
+    // Use original stored items from widget (preserve original quantities)
+    // Don't use _storedItems as it may have been modified by _updateQuantityByKey
+    final originalStoredItems = widget.initialStoredItems ?? [];
+    
+    // Track which keys have stored items (for logging)
+    final storedItemKeys = originalStoredItems.map((s) => _getItemKey(s)).toSet();
+    
+    // FIRST: Add all stored items with their ORIGINAL quantities (never replace)
+    // Order: 1st added = 1st, 2nd added = 2nd, etc.
+    for (var storedItem in originalStoredItems) {
+      allItems.add(storedItem);
+    }
+    
+    // SECOND: Add controller quantities as NEW items only when key is in _items (current product)
+    // When key is only in stored (different product screen), do NOT add again – would duplicate stored lines.
+    for (var entry in controllerQuantities.entries) {
+      final key = entry.key;
+      final controllerQty = entry.value;
+      final itemIndex = _items.indexWhere((i) => _getItemKey(i) == key);
+      if (itemIndex >= 0) {
+        // Key is in current product's _items – add as new item (same or different product/size)
+        final item = _items[itemIndex];
+        allItems.add(ChallanItem(
+          id: item.id,
+          challanId: item.challanId,
+          productId: item.productId,
+          productName: item.productName,
+          sizeId: item.sizeId,
+          sizeText: item.sizeText,
+          quantity: controllerQty,
+          unitPrice: item.unitPrice,
+          qrCode: item.qrCode,
+        ));
+      }
+      // If key is only in storedItemKeys (not in _items), skip – stored items already added above; adding again would duplicate.
     }
 
     // Filter out items with zero or no quantity
     final itemsWithQuantity = allItems.where((item) => item.quantity > 0).toList();
 
-    // Save to local storage before navigating (only items with quantity)
+    // Save to local storage before navigating (full item list so draft shows all items in Old Challans)
     final draftChallan = Challan(
-      id: null,
+      id: widget.challanId,
       challanNumber: _draftChallanNumber!,
       partyName: widget.partyName,
       stationName: widget.stationName,
@@ -463,7 +669,7 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text(
-          'Deco Jewel',
+          'DecoJewels',
           style: TextStyle(
             color: Color(0xFF1A1A1A),
             fontSize: 20,
@@ -481,45 +687,55 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
         ),
       ),
       body: SafeArea(
-        child: _isLoadingCatalog
-            ? Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const CircularProgressIndicator(
-                      valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFB8860B)),
-                      strokeWidth: 3,
-                    ),
-                    const SizedBox(height: 20),
-                    Text(
-                      'Loading product catalog...',
-                      style: TextStyle(
-                        fontSize: 16,
-                        color: Colors.grey.shade600,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ),
-              )
-            : Column(
-                children: [
-                  Expanded(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _buildBrandCategorySection(),
-                          const SizedBox(height: 16),
-                          _buildTableSection(),
+        child: Column(
+          children: [
+            if (_isLoadingCatalog)
+              LinearProgressIndicator(
+                backgroundColor: Colors.grey.shade200,
+                valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFB8860B)),
+              ),
+            Expanded(
+              child: RepaintBoundary(
+                      child: CustomScrollView(
+                        slivers: [
+                          SliverToBoxAdapter(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: _buildBrandCategorySection(),
+                            ),
+                          ),
+                          const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                          if (_tableDisplayItems.isEmpty)
+                            SliverToBoxAdapter(child: _buildEmptyTableState())
+                          else ...[
+                            SliverToBoxAdapter(child: _buildTableSectionHeader()),
+                            SliverList(
+                              delegate: SliverChildBuilderDelegate(
+                                (context, index) {
+                                  final entries = _tableEntries;
+                                  if (index >= entries.length) return null;
+                                  final e = entries[index];
+                                  if (e.isHeader) {
+                                    return _buildCategoryHeader(e.categoryName!);
+                                  }
+                                  final nextKey = index + 1 < entries.length && !entries[index + 1].isHeader
+                                      ? entries[index + 1].itemKey
+                                      : null;
+                                  return RepaintBoundary(
+                                    child: _buildTableRow(e.serial, e.item!, e.itemKey!, nextItemKey: nextKey),
+                                  );
+                                },
+                                childCount: _tableEntries.length,
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),
                   ),
-                  _buildFooterButtons(),
-                ],
-              ),
+            _buildFooterButtons(),
+          ],
+        ),
       ),
     );
   }
@@ -623,42 +839,12 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
     );
   }
 
-  Widget _buildTableSection() {
-    // Get only new items (not stored items) to show in table
-    final newItems = _newItems;
-    
-    if (newItems.isEmpty && _previousItems.isEmpty) {
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(32),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.05),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: const Column(
-          children: [
-            Icon(Icons.inventory_2_outlined, size: 48, color: Colors.grey),
-            SizedBox(height: 12),
-            Text(
-              'No products added yet',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 16,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
+  Widget _buildEmptyTableState() {
+    final hasPrevious = _previousItems.isNotEmpty;
     return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(32),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
@@ -672,121 +858,153 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
       ),
       child: Column(
         children: [
-          // Table Header
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(12),
-              ),
+          const Icon(Icons.inventory_2_outlined, size: 48, color: Colors.grey),
+          const SizedBox(height: 12),
+          Text(
+            hasPrevious ? 'No new products in this step' : 'No products added yet',
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
             ),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 50,
-                  child: Text(
-                    'S.N.',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey.shade800,
-                    ),
-                  ),
-                ),
-                Expanded(
-                  flex: 3,
-                  child: Text(
-                    'Name',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey.shade800,
-                    ),
-                  ),
-                ),
-                Expanded(
-                  flex: 2,
-                  child: Text(
-                    'Price',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey.shade800,
-                    ),
-                  ),
-                ),
-                Expanded(
-                  flex: 2,
-                  child: Text(
-                    'Quantity',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey.shade800,
-                    ),
-                  ),
-                ),
-              ],
-            ),
+            textAlign: TextAlign.center,
           ),
-          // Table Rows - Only show new items (not stored items)
-          if (newItems.isEmpty)
-            Container(
-              padding: const EdgeInsets.all(32),
-              child: Column(
-                children: [
-                  Icon(
-                    Icons.add_shopping_cart_outlined,
-                    size: 48,
-                    color: Colors.grey.shade400,
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'No new items added',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                      color: Colors.grey.shade600,
-                    ),
-                  ),
-                  if (_previousItems.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      'Previous items are stored and will be included when you click OK',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey.shade500,
-                      ),
-                    ),
-                  ],
-                ],
+          if (hasPrevious) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Previous items are saved. Add more products above or tap OK to continue.',
+              style: TextStyle(
+                fontSize: 13,
+                color: Colors.grey.shade600,
               ),
-            )
-          else
-            ...newItems.asMap().entries.map((entry) {
-            final item = entry.value;
-              // Find the actual index in _items for this item
-              final actualIndex = _items.indexWhere((i) => _getItemKey(i) == _getItemKey(item));
-              return _buildTableRow(entry.key + 1, item, actualIndex >= 0 ? actualIndex : entry.key);
-          }),
+              textAlign: TextAlign.center,
+            ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _buildTableRow(int serialNumber, ChallanItem item, int index) {
-    // Initialize controller if not exists
-    if (!_quantityControllers.containsKey(index)) {
-      _quantityControllers[index] = TextEditingController(
-        text: item.quantity > 0 ? item.quantity.toStringAsFixed(2) : '',
+  Widget _buildTableSectionHeader() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade100,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+        ),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 50,
+              child: Text(
+                'S.N.',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.grey.shade800,
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 3,
+              child: Text(
+                'Name',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.grey.shade800,
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 2,
+              child: Text(
+                'Price',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.grey.shade800,
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 2,
+              child: Text(
+                'Quantity',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.grey.shade800,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCategoryHeader(String categoryName) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFB8860B).withOpacity(0.08),
+        border: Border(
+          bottom: BorderSide(color: Colors.grey.shade200),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.category_outlined, size: 18, color: Colors.grey.shade700),
+          const SizedBox(width: 8),
+          Text(
+            categoryName,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+              color: Colors.grey.shade800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTableRow(int serialNumber, ChallanItem item, String itemKey, {String? nextItemKey}) {
+    // Controllers should already be initialized in initState
+    // Just ensure focus node exists
+    if (!_quantityFocusNodes.containsKey(itemKey)) {
+      _quantityFocusNodes[itemKey] = FocusNode();
+    }
+    
+    // Ensure controller exists as fallback (shouldn't happen, but safety check)
+    if (!_quantityControllers.containsKey(itemKey)) {
+      final storedKeys = _storedItems.map((s) => _getItemKey(s)).toSet();
+      final isSameAsStored = storedKeys.contains(itemKey);
+      _quantityControllers[itemKey] = TextEditingController(
+        text: isSameAsStored ? '' : (item.quantity > 0 ? item.quantity.toStringAsFixed(2) : ''),
       );
     }
 
     return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
       decoration: BoxDecoration(
+        color: Colors.white,
         border: Border(
           bottom: BorderSide(
             color: Colors.grey.shade200,
@@ -795,10 +1013,9 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
         ),
       ),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         child: Row(
           children: [
-            // Serial Number
             SizedBox(
               width: 50,
               child: Text(
@@ -809,38 +1026,35 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
                 ),
               ),
             ),
-            // Product Name with Size below
             Expanded(
               flex: 3,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                item.productName,
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                  color: Color(0xFF1A1A1A),
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                  ),
-                  if (item.sizeText != null && item.sizeText!.isNotEmpty) ...[
-                    const SizedBox(height: 4),
+                  if (item.sizeText != null && item.sizeText!.isNotEmpty)
                     Text(
-                      'Size: ${item.sizeText}',
+                      item.sizeText!,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Color(0xFF1A1A1A),
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    )
+                  else
+                    Text(
+                      'No size',
                       style: TextStyle(
-                        fontSize: 12,
+                        fontSize: 14,
                         fontWeight: FontWeight.w400,
                         color: Colors.grey.shade600,
                       ),
                     ),
-                  ],
                 ],
               ),
             ),
-            // Price
             Expanded(
               flex: 2,
               child: Text(
@@ -853,15 +1067,16 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
                 ),
               ),
             ),
-            // Quantity Input
             Expanded(
               flex: 2,
               child: Center(
                 child: SizedBox(
                   width: 100,
                   child: TextField(
-                    controller: _quantityControllers[index],
+                    controller: _quantityControllers[itemKey] ?? TextEditingController(),
+                    focusNode: _quantityFocusNodes[itemKey] ?? FocusNode(),
                     keyboardType: TextInputType.number,
+                    textInputAction: nextItemKey != null ? TextInputAction.next : TextInputAction.done,
                     textAlign: TextAlign.center,
                     decoration: InputDecoration(
                       hintText: 'Enter Qnty',
@@ -904,7 +1119,14 @@ class _ItemInfoChallanScreenState extends State<ItemInfoChallanScreen> {
                       color: Color(0xFF1A1A1A),
                     ),
                     onChanged: (value) {
-                      _updateQuantity(index, value);
+                      _updateQuantityByKey(itemKey, value);
+                    },
+                    onSubmitted: (_) {
+                      if (nextItemKey != null && _quantityFocusNodes.containsKey(nextItemKey)) {
+                        _quantityFocusNodes[nextItemKey]!.requestFocus();
+                      } else {
+                        FocusScope.of(context).unfocus();
+                      }
                     },
                   ),
                 ),

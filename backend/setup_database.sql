@@ -1,4 +1,4 @@
--- Database Setup Script for Delhi Jewel
+-- Database Setup Script for DecoJewel
 -- Run this in your Supabase SQL Editor or PostgreSQL client
 
 -- Create products table

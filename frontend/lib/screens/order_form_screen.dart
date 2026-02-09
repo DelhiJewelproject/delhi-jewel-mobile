@@ -792,7 +792,7 @@ void toggleScanner() async {
     if (phone.isEmpty) return;
 
     final message = '''
-*Order Confirmation - Deco Jewel*
+*Order Confirmation - DecoJewels*
 
 Order Number: *$orderNumber*
 Party Name: ${_partyNameController.text}

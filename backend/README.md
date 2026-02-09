@@ -1,6 +1,6 @@
-# Delhi Jewel Backend
+# DecoJewel Backend
 
-Python FastAPI backend for Delhi Jewel mobile application.
+Python FastAPI backend for DecoJewel mobile application.
 
 ## Setup
 
@@ -16,7 +16,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The API will be available at `http://localhost:8000`
+The API will be available at `http://0.0.0.0:9010` (reachable as `http://localhost:9010` on this machine or `http://YOUR_PC_IP:9010` from your phone on the same Wi‑Fi).
 
 ## API Endpoints
 

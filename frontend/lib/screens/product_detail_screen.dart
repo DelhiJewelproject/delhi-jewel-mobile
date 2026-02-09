@@ -286,6 +286,8 @@ class ProductDetailScreen extends StatelessWidget {
                                   ApiService.getProductQrCodeUrl(product.id!),
                                   width: 200,
                                   height: 200,
+                                  cacheWidth: 400,
+                                  cacheHeight: 400,
                                   errorBuilder: (context, error, stackTrace) {
                                     return Container(
                                       width: 200,

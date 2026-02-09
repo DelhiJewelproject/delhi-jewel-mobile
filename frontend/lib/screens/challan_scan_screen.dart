@@ -35,15 +35,24 @@ class _ChallanScanScreenState extends State<ChallanScanScreen> {
   Future<void> _fetchChallans() async {
     setState(() => _isLoading = true);
     try {
-      final challans = await ApiService.getChallans(limit: 100);
+      final challans = await ApiService.getChallans(limit: 50);
       if (!mounted) return;
       setState(() => _challans = challans);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Unable to fetch challans: $e'),
+          content: Text(
+            e.toString().contains('timeout') || e.toString().contains('Timeout')
+                ? 'Challans took too long. Tap Retry.'
+                : 'Unable to fetch challans: $e',
+          ),
           backgroundColor: Colors.red.shade600,
+          action: SnackBarAction(
+            label: 'Retry',
+            textColor: Colors.white,
+            onPressed: () => _fetchChallans(),
+          ),
         ),
       );
     } finally {

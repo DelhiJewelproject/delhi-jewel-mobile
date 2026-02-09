@@ -40,9 +40,6 @@ class _LabelScreenState extends State<LabelScreen> {
   void initState() {
     super.initState();
     _loadProducts();
-    // Initialize controllers for first item
-    _productControllers[0] = TextEditingController();
-    _numberOfLabelsControllers[0] = TextEditingController(text: '1');
   }
 
   @override
@@ -521,6 +518,18 @@ class _LabelScreenState extends State<LabelScreen> {
       hideOnError: false,
       hideOnLoading: false,
       debounceDuration: const Duration(milliseconds: 300),
+      emptyBuilder: (context) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        child: Text(
+          _isLoadingProducts
+              ? 'Loading products...'
+              : 'Type to search or select a product',
+          style: TextStyle(
+            fontSize: 14,
+            color: Colors.grey.shade600,
+          ),
+        ),
+      ),
     );
   }
 

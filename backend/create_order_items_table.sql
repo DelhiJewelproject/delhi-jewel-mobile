@@ -1,4 +1,4 @@
--- Order Items Table for Delhi Jewel
+-- Order Items Table for DecoJewel
 -- This table stores individual items within an order
 -- Allows multiple products per order
 

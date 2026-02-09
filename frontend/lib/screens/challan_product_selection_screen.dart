@@ -33,6 +33,7 @@ class _ChallanProductSelectionScreenState
   bool _isLoadingProducts = false;
   String _currentSearchQuery = '';
   List<ChallanItem> _storedItems = [];
+  List<int> _recentProductIds = []; // Product IDs from search history
 
   @override
   void initState() {
@@ -40,7 +41,15 @@ class _ChallanProductSelectionScreenState
     if (widget.initialStoredItems != null) {
       _storedItems = widget.initialStoredItems!.map((item) => item.copyWith()).toList();
     }
+    _loadRecentProductIds();
     _loadProducts();
+  }
+
+  Future<void> _loadRecentProductIds() async {
+    final ids = await LocalStorageService.getProductSearchHistoryIds();
+    setState(() {
+      _recentProductIds = ids;
+    });
   }
 
   @override
@@ -71,20 +80,49 @@ class _ChallanProductSelectionScreenState
   }
 
   List<Product> _getFilteredProducts(String searchQuery) {
+    List<Product> filtered;
+    
     if (searchQuery.isEmpty) {
-      return _products;
+      filtered = _products;
+    } else {
+      final search = searchQuery.toLowerCase();
+      filtered = _products
+          .where((product) {
+            final name = (product.name ?? '').toLowerCase();
+            final externalId = product.externalId?.toString().toLowerCase() ?? '';
+            final categoryName = (product.categoryName ?? '').toLowerCase();
+            return name.contains(search) ||
+                externalId.contains(search) ||
+                categoryName.contains(search);
+          })
+          .toList();
     }
-    final search = searchQuery.toLowerCase();
-    return _products
-        .where((product) {
-          final name = (product.name ?? '').toLowerCase();
-          final externalId = product.externalId?.toString().toLowerCase() ?? '';
-          final categoryName = (product.categoryName ?? '').toLowerCase();
-          return name.contains(search) ||
-              externalId.contains(search) ||
-              categoryName.contains(search);
-        })
-        .toList();
+    
+    // Sort: recent/most searched products first, then others
+    filtered.sort((a, b) {
+      final aId = a.id;
+      final bId = b.id;
+      
+      if (aId == null || bId == null) return 0;
+      
+      final aIsRecent = _recentProductIds.contains(aId);
+      final bIsRecent = _recentProductIds.contains(bId);
+      
+      if (aIsRecent && !bIsRecent) return -1;
+      if (!aIsRecent && bIsRecent) return 1;
+      
+      // If both are recent or both are not, maintain original order
+      // But prioritize by position in recent list
+      if (aIsRecent && bIsRecent) {
+        final aIndex = _recentProductIds.indexOf(aId);
+        final bIndex = _recentProductIds.indexOf(bId);
+        return aIndex.compareTo(bIndex);
+      }
+      
+      return 0;
+    });
+    
+    return filtered;
   }
 
   // Helper function to get price based on price category
@@ -131,23 +169,27 @@ class _ChallanProductSelectionScreenState
 
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
+      resizeToAvoidBottomInset: false, // Prevent resizing when keyboard appears
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.white,
+        toolbarHeight: 48, // Reduced from default ~56
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF1A1A1A)),
+          icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF1A1A1A), size: 20),
+          padding: const EdgeInsets.all(8), // Reduced padding
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text(
           'Select Product',
           style: TextStyle(
             color: Color(0xFF1A1A1A),
-            fontSize: 20,
+            fontSize: 18, // Reduced from 20
             fontWeight: FontWeight.bold,
-            letterSpacing: 0.5,
+            letterSpacing: 0.3, // Reduced from 0.5
           ),
         ),
         centerTitle: false,
+        titleSpacing: 0, // Remove extra spacing
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
           child: Container(
@@ -161,154 +203,113 @@ class _ChallanProductSelectionScreenState
           children: [
             Expanded(
               child: SingleChildScrollView(
-                padding: EdgeInsets.all(isMobile ? 16 : 24),
+                padding: EdgeInsets.symmetric(
+                  horizontal: isMobile ? 12 : 20, // Reduced horizontal padding
+                  vertical: isMobile ? 8 : 12, // Reduced vertical padding
+                ),
                 child: Form(
                   key: _formKey,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                // Challan Info Card
+                // Combined Card: Challan Info + Product Selection
                 Container(
-                  padding: const EdgeInsets.all(20),
+                  padding: const EdgeInsets.all(10), // Further reduced from 12
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(12), // Reduced from 16
                     boxShadow: [
                       BoxShadow(
                         color: Colors.black.withValues(alpha: 0.05),
-                        blurRadius: 10,
-                        offset: const Offset(0, 4),
+                        blurRadius: 8, // Reduced from 10
+                        offset: const Offset(0, 2), // Reduced from 4
                       ),
                     ],
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // Challan Info Row (compact)
                       Row(
                         children: [
                           Container(
-                            padding: const EdgeInsets.all(10),
+                            padding: const EdgeInsets.all(5), // Further reduced from 6
                             decoration: BoxDecoration(
                               color: const Color(0xFFB8860B).withValues(alpha: 0.1),
-                              borderRadius: BorderRadius.circular(10),
+                              borderRadius: BorderRadius.circular(5), // Reduced from 6
                             ),
                             child: const Icon(
                               Icons.receipt_long_rounded,
                               color: Color(0xFFB8860B),
-                              size: 24,
+                              size: 16, // Further reduced from 18
                             ),
                           ),
-                          const SizedBox(width: 12),
+                          const SizedBox(width: 6), // Reduced from 8
                           Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'Selected Challan',
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.grey,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  widget.challan.challanNumber,
-                                  style: const TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFF1A1A1A),
-                                  ),
-                                ),
-                                if (widget.challan.id != null) ...[
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    'ID: ${widget.challan.id}',
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      color: Colors.grey.shade600,
-                                    ),
-                                  ),
-                                ],
-                              ],
+                            child: Text(
+                              widget.challan.challanNumber,
+                              style: const TextStyle(
+                                fontSize: 14, // Further reduced from 15
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1A1A1A),
+                              ),
                             ),
                           ),
                         ],
                       ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 24),
-
-                // Product Selection Card
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.05),
-                        blurRadius: 10,
-                        offset: const Offset(0, 4),
+                      const SizedBox(height: 8), // Further reduced from 12
+                      // Divider
+                      Divider(
+                        height: 0.5, // Reduced from 1
+                        thickness: 0.5, // Reduced from 1
+                        color: Colors.grey.shade200,
                       ),
-                    ],
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
+                      const SizedBox(height: 8), // Further reduced from 12
+                      // Product Selection
                       Row(
                         children: [
                           const Icon(
                             Icons.inventory_2_outlined,
                             color: Color(0xFFB8860B),
-                            size: 20,
+                            size: 15, // Further reduced from 16
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 5), // Reduced from 6
                           const Text(
                             'Select Product',
                             style: TextStyle(
-                              fontSize: 16,
+                              fontSize: 13, // Further reduced from 14
                               fontWeight: FontWeight.bold,
                               color: Color(0xFF1A1A1A),
                             ),
                           ),
-                          const SizedBox(width: 4),
+                          const SizedBox(width: 3), // Reduced from 4
                           const Text(
                             '*',
                             style: TextStyle(
                               color: Colors.red,
-                              fontSize: 16,
+                              fontSize: 13, // Further reduced from 14
                               fontWeight: FontWeight.bold,
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 16),
-                      _isLoadingProducts
-                          ? const Center(
-                              child: Padding(
-                                padding: EdgeInsets.all(20),
-                                child: CircularProgressIndicator(
-                                  valueColor: AlwaysStoppedAnimation<Color>(
-                                    Color(0xFFB8860B),
-                                  ),
-                                ),
-                              ),
-                            )
-                          : TypeAheadField<Product>(
+                      const SizedBox(height: 8), // Further reduced from 10
+                      TypeAheadField<Product>(
                               controller: _productController,
                               builder: (context, controller, focusNode) {
                                 return TextFormField(
                                   controller: controller,
                                   focusNode: focusNode,
+                                  readOnly: _isLoadingProducts,
                                   onChanged: (value) {
                                     setState(() {
                                       _currentSearchQuery = value;
                                     });
                                   },
                                   decoration: InputDecoration(
-                                    hintText: 'Search by name, ID, or category',
+                                    hintText: _isLoadingProducts
+                                        ? 'Loading products...'
+                                        : 'Search by name, ID, or category',
                                     hintStyle: TextStyle(
                                       color: Colors.grey.shade400,
                                       fontSize: 15,
@@ -316,9 +317,10 @@ class _ChallanProductSelectionScreenState
                                     filled: true,
                                     fillColor: Colors.grey.shade50,
                                     contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 16,
+                                      horizontal: 14, // Reduced from 16
+                                      vertical: 12, // Reduced from 16
                                     ),
+                                    isDense: true, // Make input field more compact
                                     border: OutlineInputBorder(
                                       borderRadius: BorderRadius.circular(12),
                                       borderSide: BorderSide(
@@ -358,22 +360,36 @@ class _ChallanProductSelectionScreenState
                                       Icons.search_rounded,
                                       color: Colors.grey.shade600,
                                     ),
-                                    suffixIcon: controller.text.isNotEmpty
-                                        ? IconButton(
-                                            icon: Icon(
-                                              Icons.clear,
-                                              size: 20,
-                                              color: Colors.grey.shade400,
+                                    suffixIcon: _isLoadingProducts
+                                        ? const Padding(
+                                            padding: EdgeInsets.all(12),
+                                            child: SizedBox(
+                                              width: 24,
+                                              height: 24,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                valueColor: AlwaysStoppedAnimation<Color>(
+                                                  Color(0xFFB8860B),
+                                                ),
+                                              ),
                                             ),
-                                            onPressed: () {
-                                              controller.clear();
-                                              setState(() {
-                                                _selectedProduct = null;
-                                                _currentSearchQuery = '';
-                                              });
-                                            },
                                           )
-                                        : null,
+                                        : (controller.text.isNotEmpty
+                                            ? IconButton(
+                                                icon: Icon(
+                                                  Icons.clear,
+                                                  size: 20,
+                                                  color: Colors.grey.shade400,
+                                                ),
+                                                onPressed: () {
+                                                  controller.clear();
+                                                  setState(() {
+                                                    _selectedProduct = null;
+                                                    _currentSearchQuery = '';
+                                                  });
+                                                },
+                                              )
+                                            : null),
                                   ),
                                   validator: (value) {
                                     if ((value ?? '').isEmpty) {
@@ -391,31 +407,55 @@ class _ChallanProductSelectionScreenState
                                 );
                               },
                               suggestionsCallback: (pattern) async {
-                                setState(() {
-                                  _currentSearchQuery = pattern;
-                                });
-                                if (pattern.isEmpty) {
-                                  return _products.take(20).toList();
+                                if (mounted) {
+                                  setState(() => _currentSearchQuery = pattern);
                                 }
-                                final search = pattern.toLowerCase();
-                                final filtered = _products
-                                    .where((product) {
-                                      final name =
-                                          (product.name ?? '').toLowerCase();
-                                      final externalId = product.externalId
-                                              ?.toString()
-                                              .toLowerCase() ??
-                                          '';
-                                      final categoryName = (product.categoryName ?? '')
-                                          .toLowerCase();
-                                      return name.contains(search) ||
-                                          externalId.contains(search) ||
-                                          categoryName.contains(search);
-                                    })
-                                    .toList();
                                 
-                                // Return first 20 results
-                                return filtered.take(20).toList();
+                                List<Product> results;
+                                if (pattern.isEmpty) {
+                                  results = _products.take(20).toList();
+                                } else {
+                                  final search = pattern.toLowerCase();
+                                  results = _products
+                                      .where((product) {
+                                        final name =
+                                            (product.name ?? '').toLowerCase();
+                                        final externalId = product.externalId
+                                                ?.toString()
+                                                .toLowerCase() ??
+                                            '';
+                                        final categoryName = (product.categoryName ?? '')
+                                            .toLowerCase();
+                                        return name.contains(search) ||
+                                            externalId.contains(search) ||
+                                            categoryName.contains(search);
+                                      })
+                                      .toList();
+                                }
+                                
+                                // Sort: recent/most searched products first
+                                results.sort((a, b) {
+                                  final aId = a.id;
+                                  final bId = b.id;
+                                  
+                                  if (aId == null || bId == null) return 0;
+                                  
+                                  final aIsRecent = _recentProductIds.contains(aId);
+                                  final bIsRecent = _recentProductIds.contains(bId);
+                                  
+                                  if (aIsRecent && !bIsRecent) return -1;
+                                  if (!aIsRecent && bIsRecent) return 1;
+                                  
+                                  if (aIsRecent && bIsRecent) {
+                                    final aIndex = _recentProductIds.indexOf(aId);
+                                    final bIndex = _recentProductIds.indexOf(bId);
+                                    return aIndex.compareTo(bIndex);
+                                  }
+                                  
+                                  return 0;
+                                });
+                                
+                                return results.take(20).toList();
                               },
                               itemBuilder: (context, Product suggestion) {
                                 return Container(
@@ -428,62 +468,63 @@ class _ChallanProductSelectionScreenState
                                     ),
                                   ),
                                   child: ListTile(
+                                    // Minimal vertical padding so rows are as tight as possible
+                                    dense: true, // Make tiles more compact
                                     contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 12,
+                                      horizontal: 12, // Reduced from 16
+                                      vertical: 6, // Further reduced from 8
                                     ),
+                                    minVerticalPadding: 0, // Remove extra vertical padding
+                                    visualDensity: const VisualDensity(horizontal: 0, vertical: -4), // Make even more compact
                                     leading: Container(
-                                      padding: const EdgeInsets.all(8),
+                                      padding: const EdgeInsets.all(5), // Further reduced from 6
                                       decoration: BoxDecoration(
                                         color: const Color(0xFFB8860B)
                                             .withValues(alpha: 0.1),
-                                        borderRadius: BorderRadius.circular(8),
+                                        borderRadius: BorderRadius.circular(5), // Reduced from 6
                                       ),
                                       child: const Icon(
                                         Icons.inventory_2_outlined,
-                                        size: 20,
+                                        size: 16, // Further reduced from 18
                                         color: Color(0xFFB8860B),
                                       ),
                                     ),
                                     title: Text(
                                       suggestion.name ?? 'Unnamed Product',
                                       style: const TextStyle(
-                                        fontSize: 15,
+                                        fontSize: 13, // Further reduced from 14
                                         fontWeight: FontWeight.w600,
                                         color: Color(0xFF1A1A1A),
                                       ),
                                       overflow: TextOverflow.ellipsis,
                                       maxLines: 1,
                                     ),
-                                    subtitle: Text(
-                                      [
-                                        if (suggestion.categoryName != null)
-                                          suggestion.categoryName,
-                                        if (suggestion.externalId != null)
-                                          'ID: ${suggestion.externalId}',
-                                      ].whereType<String>().join(' • '),
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        color: Colors.grey.shade600,
-                                      ),
-                                      overflow: TextOverflow.ellipsis,
-                                      maxLines: 1,
-                                    ),
+                                    // Removed subtitle (e.g., "PVC SHEETING ROLL FORM") as requested
                                     tileColor: Colors.white,
                                   ),
                                 );
                               },
-                              onSelected: (Product suggestion) {
+                              onSelected: (Product suggestion) async {
                                 setState(() {
                                   _selectedProduct = suggestion;
                                   _productController.text =
                                       suggestion.name ?? 'Product';
                                 });
+                                
+                                // Save to search history
+                                if (suggestion.id != null && suggestion.name != null) {
+                                  await LocalStorageService.saveProductSearch(
+                                    suggestion.id!,
+                                    suggestion.name!,
+                                  );
+                                  // Reload recent IDs to update sorting
+                                  await _loadRecentProductIds();
+                                }
                               },
                               hideOnEmpty: false,
                               hideOnError: false,
                               hideOnLoading: false,
-                              debounceDuration: const Duration(milliseconds: 300),
+                              debounceDuration: const Duration(milliseconds: 450),
                             ),
                     ],
                   ),
