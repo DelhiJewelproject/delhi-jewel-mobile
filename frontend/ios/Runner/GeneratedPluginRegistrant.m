@@ -24,12 +24,6 @@
 @import mobile_scanner;
 #endif
 
-#if __has_include(<path_provider_foundation/PathProviderPlugin.h>)
-#import <path_provider_foundation/PathProviderPlugin.h>
-#else
-@import path_provider_foundation;
-#endif
-
 #if __has_include(<permission_handler_apple/PermissionHandlerPlugin.h>)
 #import <permission_handler_apple/PermissionHandlerPlugin.h>
 #else
@@ -72,7 +66,6 @@
   [FPPDeviceInfoPlusPlugin registerWithRegistrar:[registry registrarForPlugin:@"FPPDeviceInfoPlusPlugin"]];
   [FlutterKeyboardVisibilityPlugin registerWithRegistrar:[registry registrarForPlugin:@"FlutterKeyboardVisibilityPlugin"]];
   [MobileScannerPlugin registerWithRegistrar:[registry registrarForPlugin:@"MobileScannerPlugin"]];
-  [PathProviderPlugin registerWithRegistrar:[registry registrarForPlugin:@"PathProviderPlugin"]];
   [PermissionHandlerPlugin registerWithRegistrar:[registry registrarForPlugin:@"PermissionHandlerPlugin"]];
   [PointerInterceptorIosPlugin registerWithRegistrar:[registry registrarForPlugin:@"PointerInterceptorIosPlugin"]];
   [SharedPreferencesPlugin registerWithRegistrar:[registry registrarForPlugin:@"SharedPreferencesPlugin"]];

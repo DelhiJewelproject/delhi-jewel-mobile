@@ -223,40 +223,17 @@ class _NewChallanFormScreenState extends State<NewChallanFormScreen> {
 
     setState(() => _isLoadingOptions = true);
     try {
-      Challan challan;
-
-      // Reuse an existing empty draft challan (no products) instead of creating a new one
-      final emptyDrafts = await ApiService.getEmptyDraftChallans(limit: 10);
-      if (emptyDrafts.isNotEmpty) {
-        // Prefer one for the same party, otherwise use the first (most recently updated)
-        Challan? sameParty;
-        for (final c in emptyDrafts) {
-          if ((c.partyName ?? '').trim().toLowerCase() == partyName.toLowerCase()) {
-            sameParty = c;
-            break;
-          }
-        }
-        final toReuse = sameParty ?? emptyDrafts.first;
-        final updatePayload = {
-          'party_name': partyName,
-          'station_name': stationName,
-          'transport_name': transportName,
-          'price_category': priceCategory,
-          'status': 'draft',
-          'items': <Map<String, dynamic>>[],
-        };
-        challan = await ApiService.updateChallan(toReuse.id!, updatePayload);
-      } else {
-        final challanData = {
-          'party_name': partyName,
-          'station_name': stationName,
-          'transport_name': transportName,
-          'price_category': priceCategory,
-          'status': 'draft',
-          'items': <Map<String, dynamic>>[],
-        };
-        challan = await ApiService.createChallan(challanData);
-      }
+      // Always create a new challan so each device/session gets a unique one.
+      // Never reuse empty drafts — another device may already be using them.
+      final challanData = {
+        'party_name': partyName,
+        'station_name': stationName,
+        'transport_name': transportName,
+        'price_category': priceCategory,
+        'status': 'draft',
+        'items': <Map<String, dynamic>>[],
+      };
+      final challan = await ApiService.createChallan(challanData);
 
       if (!mounted) return;
 

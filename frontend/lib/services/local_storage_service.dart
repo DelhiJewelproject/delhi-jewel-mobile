@@ -40,29 +40,23 @@ class LocalStorageService {
       final prefs = await SharedPreferences.getInstance();
       final draftChallans = await getDraftChallans();
 
-      // 1) Match by DC (storage is always DC-only)
+      // 1) Match by DC number (primary — unique identifier)
       int existingIndex = draftChallans.indexWhere((c) {
         final dc = extractDcPart(c.challanNumber);
-        return dc != null && dc.toUpperCase() == (incomingDc ?? '').toUpperCase();
+        return dc != null && incomingDc != null && incomingDc.isNotEmpty && dc.toUpperCase() == incomingDc.toUpperCase();
       });
       bool matchedByNumber = existingIndex >= 0;
 
-      if (existingIndex == -1) {
-        existingIndex = draftChallans.indexWhere((c) =>
-            c.partyName == challan.partyName &&
-            c.stationName == challan.stationName &&
-            (c.transportName ?? '') == (challan.transportName ?? '') &&
-            c.status == 'draft');
-      }
+      // 2) Match by challan ID (secondary — database identifier)
+      // NOTE: No party-based fallback match. Two different challans for the
+      // same party/station/transport must remain separate entries in local
+      // storage. A party-based match caused ID corruption when two challans
+      // shared the same party details — the second challan would overwrite the
+      // first, inheriting the wrong server ID, and "End Challan" would then
+      // finalize the wrong challan on the server.
       if (existingIndex == -1 && challan.id != null) {
         existingIndex = draftChallans.indexWhere((c) =>
             c.id != null && c.id == challan.id);
-      }
-      if (existingIndex == -1 && incomingDc != null && incomingDc.isNotEmpty) {
-        existingIndex = draftChallans.indexWhere((c) {
-          final dc = extractDcPart(c.challanNumber);
-          return dc != null && dc.toUpperCase() == incomingDc.toUpperCase();
-        });
       }
 
       if (existingIndex != -1) {
@@ -73,7 +67,7 @@ class LocalStorageService {
             ? challan.items
             : _mergeDraftItems(existing.items, challan.items);
         draftChallans[existingIndex] = Challan(
-          id: existing.id ?? challan.id,
+          id: challan.id ?? existing.id,
           challanNumber: storageNumber,
           partyName: challan.partyName,
           stationName: challan.stationName,

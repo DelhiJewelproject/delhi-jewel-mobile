@@ -572,7 +572,7 @@ class ApiService {
     for (var attempt = 1; attempt <= 2; attempt++) {
       try {
         final response = await http.get(
-          Uri.parse('$baseUrl/api/orders/party-data?party_name=$encoded'),
+          Uri.parse('$baseUrl/api/orders/party-data/$encoded'),
           headers: {'Content-Type': 'application/json'},
         ).timeout(const Duration(seconds: 25));
 

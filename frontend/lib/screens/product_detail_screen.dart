@@ -256,14 +256,14 @@ class ProductDetailScreen extends StatelessWidget {
                           ),
                           child: Column(
                             children: [
-                              const Row(
+                              Row(
                                 children: [
-                                  Icon(
+                                  const Icon(
                                     Icons.qr_code_rounded,
                                     color: Color(0xFFB8860B),
                                     size: 24,
                                   ),
-                                  SizedBox(width: 12),
+                                  const SizedBox(width: 12),
                                   Text(
                                     'QR Code',
                                     style: TextStyle(
@@ -310,7 +310,7 @@ class ProductDetailScreen extends StatelessWidget {
                                 'Scan to view product details',
                                 style: TextStyle(
                                   fontSize: 12,
-                                  color: const Color(0xFF1A1A1A)70,
+                                  color: Color(0xFF1A1A1A).withValues(alpha: 0.7),
                                 ),
                               ),
                             ],
@@ -485,10 +485,10 @@ class ProductDetailScreen extends StatelessWidget {
       ),
       child: Text(
         '$label: ₹${price.toStringAsFixed(2)}',
-        style: const TextStyle(
+        style: TextStyle(
           fontSize: 12,
           fontWeight: FontWeight.w600,
-          color: const Color(0xFF1A1A1A)70,
+          color: Color(0xFF1A1A1A).withValues(alpha: 0.7),
         ),
       ),
     );
@@ -520,7 +520,7 @@ class ProductDetailScreen extends StatelessWidget {
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
-                  color: const Color(0xFF1A1A1A)70,
+                  color: Color(0xFF1A1A1A).withValues(alpha: 0.7),
                 ),
               ),
               const SizedBox(height: 4),

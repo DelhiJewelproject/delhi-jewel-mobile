@@ -169,7 +169,7 @@ class _ChallanProductSelectionScreenState
 
     return Scaffold(
       backgroundColor: const Color(0xFFF5F5F5),
-      resizeToAvoidBottomInset: false, // Prevent resizing when keyboard appears
+      resizeToAvoidBottomInset: true, // Allow resizing so keyboard doesn't overlap Next button
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.white,
@@ -687,25 +687,28 @@ class _ChallanProductSelectionScreenState
       return;
     }
 
-    // Check for existing draft challan number based on party/station/transport
+    // Check for existing draft challan number — match by DC number, not party name,
+    // to avoid picking up a different challan for the same party.
     String? existingDraftNumber;
     try {
-      final draftChallans = await LocalStorageService.getDraftChallans();
-      final existingDraft = draftChallans.firstWhere(
-        (c) =>
-            c.partyName == widget.challan.partyName &&
-            c.stationName == widget.challan.stationName &&
-            (c.transportName ?? '') == (widget.challan.transportName ?? '') &&
-            c.status == 'draft',
-        orElse: () => Challan(
-          id: null,
-          challanNumber: '',
-          partyName: '',
-          stationName: '',
-        ),
-      );
-      if (existingDraft.challanNumber.isNotEmpty) {
-        existingDraftNumber = existingDraft.challanNumber;
+      final ourDc = LocalStorageService.extractDcPart(widget.challan.challanNumber);
+      if (ourDc != null && ourDc.isNotEmpty) {
+        final draftChallans = await LocalStorageService.getDraftChallans();
+        final existingDraft = draftChallans.firstWhere(
+          (c) {
+            final dc = LocalStorageService.extractDcPart(c.challanNumber);
+            return dc != null && dc.toUpperCase() == ourDc.toUpperCase();
+          },
+          orElse: () => Challan(
+            id: null,
+            challanNumber: '',
+            partyName: '',
+            stationName: '',
+          ),
+        );
+        if (existingDraft.challanNumber.isNotEmpty) {
+          existingDraftNumber = existingDraft.challanNumber;
+        }
       }
     } catch (e) {
       // Ignore errors

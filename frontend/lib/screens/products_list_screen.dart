@@ -216,7 +216,7 @@ class _ProductsListScreenState extends State<ProductsListScreen>
                   '${_products.length} products available',
                   style: TextStyle(
                     fontSize: isSmallScreen ? 12 : 14,
-                    color: const Color(0xFF1A1A1A)70,
+                    color: Color(0xFF1A1A1A).withValues(alpha: 0.7),
                   ),
                 ),
               ],
@@ -286,13 +286,13 @@ class _ProductsListScreenState extends State<ProductsListScreen>
               decoration: InputDecoration(
                 hintText: 'Search products...',
                 hintStyle: TextStyle(
-                  color: const Color(0xFF1A1A1A)60,
+                  color: Color(0xFF1A1A1A).withValues(alpha: 0.6),
                   fontSize: isSmallScreen ? 14 : 15,
                 ),
                 prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFFB8860B)),
                 suffixIcon: _searchQuery.isNotEmpty
                     ? IconButton(
-                        icon: const Icon(Icons.clear_rounded, size: 20, color: const Color(0xFF1A1A1A)70),
+                        icon: Icon(Icons.clear_rounded, size: 20, color: Color(0xFF1A1A1A).withValues(alpha: 0.7)),
                         onPressed: () {
                           setState(() {
                             _searchQuery = '';
@@ -411,7 +411,7 @@ class _ProductsListScreenState extends State<ProductsListScreen>
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: isSmallScreen ? 13 : 14,
-                color: const Color(0xFF1A1A1A)70,
+                color: Color(0xFF1A1A1A).withValues(alpha: 0.7),
               ),
             ),
             SizedBox(height: isSmallScreen ? 24 : 32),
@@ -480,7 +480,7 @@ class _ProductsListScreenState extends State<ProductsListScreen>
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: isSmallScreen ? 13 : 14,
-                color: const Color(0xFF1A1A1A)70,
+                color: Color(0xFF1A1A1A).withValues(alpha: 0.7),
               ),
             ),
           ],
@@ -989,4 +989,29 @@ class _ActionButtonState extends State<_ActionButton>
       ),
     );
   }
+}
+
+class _DiamondPatternPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = const Color(0xFFB8860B).withOpacity(0.08)
+      ..style = PaintingStyle.fill;
+
+    const spacing = 40.0;
+    for (double x = 0; x < size.width + spacing; x += spacing) {
+      for (double y = 0; y < size.height + spacing; y += spacing) {
+        final path = Path()
+          ..moveTo(x, y - 10)
+          ..lineTo(x + 10, y)
+          ..lineTo(x, y + 10)
+          ..lineTo(x - 10, y)
+          ..close();
+        canvas.drawPath(path, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

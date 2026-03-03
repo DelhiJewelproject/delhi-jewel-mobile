@@ -345,6 +345,10 @@ class _ChallanSummaryScreenState extends State<ChallanSummaryScreen> {
     setState(() => _isSubmitting = true);
     try {
       final payload = {
+        'party_name': widget.partyName,
+        'station_name': widget.stationName,
+        'transport_name': widget.transportName,
+        'price_category': widget.priceCategory,
         'items': itemsWithQuantity.map((item) => item.toPayload()).toList(),
         'status': 'ready', // Finalize the challan - ready for dispatch
       };

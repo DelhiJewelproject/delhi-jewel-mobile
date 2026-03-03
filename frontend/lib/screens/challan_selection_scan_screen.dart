@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:flutter_typeahead/flutter_typeahead.dart';
 import 'package:vibration/vibration.dart';
 
 import '../models/challan.dart';
@@ -480,25 +479,28 @@ class _ChallanSelectionScanScreenState
       // Ignore errors when stopping scanner
     }
 
-    // Check for existing draft challan number
+    // Check for existing draft challan number — match by DC number, not party name,
+    // to avoid picking up a different challan for the same party.
     String? existingDraftNumber;
     try {
-      final draftChallans = await LocalStorageService.getDraftChallans();
-      final existingDraft = draftChallans.firstWhere(
-        (c) =>
-            c.partyName == challanToUse!.partyName &&
-            c.stationName == challanToUse.stationName &&
-            (c.transportName ?? '') == (challanToUse.transportName ?? '') &&
-            c.status == 'draft',
-        orElse: () => Challan(
-          id: null,
-          challanNumber: '',
-          partyName: '',
-          stationName: '',
-        ),
-      );
-      if (existingDraft.challanNumber.isNotEmpty) {
-        existingDraftNumber = existingDraft.challanNumber;
+      final ourDc = LocalStorageService.extractDcPart(challanToUse!.challanNumber);
+      if (ourDc != null && ourDc.isNotEmpty) {
+        final draftChallans = await LocalStorageService.getDraftChallans();
+        final existingDraft = draftChallans.firstWhere(
+          (c) {
+            final dc = LocalStorageService.extractDcPart(c.challanNumber);
+            return dc != null && dc.toUpperCase() == ourDc.toUpperCase();
+          },
+          orElse: () => Challan(
+            id: null,
+            challanNumber: '',
+            partyName: '',
+            stationName: '',
+          ),
+        );
+        if (existingDraft.challanNumber.isNotEmpty) {
+          existingDraftNumber = existingDraft.challanNumber;
+        }
       }
     } catch (e) {
       // Ignore errors
@@ -675,236 +677,48 @@ class _ChallanSelectionScanScreenState
               )
             : Column(
                 children: [
-                  // Select Challan Dropdown
-                  Container(
-                    margin: const EdgeInsets.all(16),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.05),
-                          blurRadius: 8,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            const Icon(
+                  // Challan Number Display
+                  if (_selectedChallan != null)
+                    Container(
+                      margin: const EdgeInsets.all(16),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.05),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFB8860B).withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(
                               Icons.receipt_long_rounded,
                               color: Color(0xFFB8860B),
                               size: 20,
                             ),
-                            const SizedBox(width: 8),
-                            const Text(
-                              'Select Challan',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                                color: Color(0xFF1A1A1A),
-                              ),
+                          ),
+                          const SizedBox(width: 12),
+                          Text(
+                            _selectedChallan!.challanNumber,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF1A1A1A),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 12),
-                        TypeAheadField<Challan>(
-                          controller: _challanController,
-                          builder: (context, controller, focusNode) {
-                            return TextFormField(
-                              controller: controller,
-                              focusNode: focusNode,
-                              decoration: InputDecoration(
-                                hintText: 'Search challan by number or ID',
-                                hintStyle: TextStyle(
-                                  color: Colors.grey.shade400,
-                                  fontSize: 15,
-                                ),
-                                filled: true,
-                                fillColor: Colors.grey.shade50,
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 16,
-                                ),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide(
-                                    color: Colors.grey.shade300,
-                                    width: 1.5,
-                                  ),
-                                ),
-                                enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide(
-                                    color: Colors.grey.shade300,
-                                    width: 1.5,
-                                  ),
-                                ),
-                                focusedBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: const BorderSide(
-                                    color: Color(0xFFB8860B),
-                                    width: 2,
-                                  ),
-                                ),
-                                prefixIcon: Icon(
-                                  Icons.search_rounded,
-                                  color: Colors.grey.shade600,
-                                ),
-                                suffixIcon: controller.text.isNotEmpty
-                                    ? IconButton(
-                                        icon: Icon(
-                                          Icons.clear,
-                                          size: 20,
-                                          color: Colors.grey.shade400,
-                                        ),
-                                        onPressed: () {
-                                          controller.clear();
-                                          setState(() {
-                                            _selectedChallan = null;
-                                            _lastScannedCode = null;
-                                            _lastScanTime = null;
-                                          });
-                                        },
-                                      )
-                                    : null,
-                              ),
-                              style: const TextStyle(
-                                fontSize: 15,
-                                color: Color(0xFF1A1A1A),
-                              ),
-                            );
-                          },
-                          suggestionsCallback: (pattern) async {
-                            final List<Challan> results = [];
-                            
-                            // Add "Create New Challan" option at the top if form data is provided
-                            if (widget.partyName != null && 
-                                widget.stationName != null && 
-                                widget.transportName != null) {
-                              // Create a special "New Challan" entry
-                              results.add(Challan(
-                                id: -1, // Special ID to identify new challan
-                                challanNumber: 'NEW_CHALLAN',
-                                partyName: widget.partyName!,
-                                stationName: widget.stationName!,
-                                transportName: widget.transportName,
-                                priceCategory: widget.priceCategory,
-                                status: 'draft',
-                                items: [],
-                              ));
-                            }
-                            
-                            // Add draft challans
-                            if (pattern.isEmpty) {
-                              results.addAll(_draftChallans);
-                            } else {
-                              final search = pattern.toLowerCase();
-                              final filtered = _draftChallans
-                                  .where((challan) {
-                                    return challan.challanNumber
-                                            .toLowerCase()
-                                            .contains(search) ||
-                                        challan.partyName
-                                            .toLowerCase()
-                                            .contains(search) ||
-                                        challan.stationName
-                                            .toLowerCase()
-                                            .contains(search);
-                                  })
-                                  .toList();
-                              results.addAll(filtered);
-                            }
-                            
-                            return results;
-                          },
-                          itemBuilder: (context, Challan suggestion) {
-                            final isNewChallan = suggestion.id == -1;
-                            
-                            return Container(
-                              decoration: BoxDecoration(
-                                border: Border(
-                                  bottom: BorderSide(
-                                    color: Colors.grey.shade200,
-                                    width: 0.5,
-                                  ),
-                                ),
-                                color: isNewChallan 
-                                    ? const Color(0xFFFDF4E3) 
-                                    : Colors.white,
-                              ),
-                              child: ListTile(
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 12,
-                                ),
-                                leading: Container(
-                                  padding: const EdgeInsets.all(8),
-                                  decoration: BoxDecoration(
-                                    color: isNewChallan
-                                        ? const Color(0xFFB8860B)
-                                        : const Color(0xFFB8860B)
-                                            .withValues(alpha: 0.1),
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Icon(
-                                    isNewChallan 
-                                        ? Icons.add_circle_outline_rounded
-                                        : Icons.receipt_long_rounded,
-                                    size: 20,
-                                    color: isNewChallan 
-                                        ? Colors.white 
-                                        : const Color(0xFFB8860B),
-                                  ),
-                                ),
-                                title: Text(
-                                  isNewChallan 
-                                      ? 'Create New Challan'
-                                      : suggestion.challanNumber,
-                                  style: TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w600,
-                                    color: isNewChallan 
-                                        ? const Color(0xFFB8860B)
-                                        : const Color(0xFF1A1A1A),
-                                  ),
-                                ),
-                                subtitle: isNewChallan
-                                    ? Text(
-                                        '${suggestion.partyName} • ${suggestion.stationName}',
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          color: Colors.grey.shade700,
-                                        ),
-                                      )
-                                    : Text(
-                                        '${suggestion.partyName} • ${suggestion.stationName}${suggestion.items != null && suggestion.items!.isNotEmpty ? ' • ${suggestion.items!.length} items' : ''}',
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          color: Colors.grey.shade600,
-                                        ),
-                                      ),
-                                tileColor: isNewChallan 
-                                    ? const Color(0xFFFDF4E3) 
-                                    : Colors.white,
-                              ),
-                            );
-                          },
-                          onSelected: (Challan suggestion) {
-                            _handleChallanSelected(suggestion);
-                          },
-                          hideOnEmpty: false,
-                          hideOnError: false,
-                          hideOnLoading: false,
-                          debounceDuration: const Duration(milliseconds: 300),
-                        ),
-                      ],
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
 
                   // Continue with New Challan Button (only show when form data is provided and no challan selected)
                   if (widget.partyName != null && 
